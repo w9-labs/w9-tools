@@ -75,81 +75,173 @@ fn is_image_ext(ext: &str) -> bool {
 }
 
 fn encode_jpeg_under_limit(img: &DynamicImage, max_bytes: usize) -> Option<Vec<u8>> {
-    // Try multiple qualities and downscales until under limit
-    // For very large images (>20MB), be more aggressive with scaling and quality reduction
-    let mut scales = vec![1.0, 0.9, 0.75, 0.6, 0.5, 0.4, 0.3, 0.25, 0.2, 0.15, 0.1];
-    let qualities = vec![85u8, 75, 65, 55, 45, 35, 25, 15];
-    
     let (w, h) = img.dimensions();
-    
-    for scale in scales.drain(..) {
+    let original_pixels = (w * h) as usize;
+
+    // Estimate rough JPEG compression ratio (typically 10-50:1 depending on content)
+    let estimated_jpeg_ratio = 20.0; // Conservative estimate
+    let estimated_jpeg_size = original_pixels / estimated_jpeg_ratio as usize;
+
+    // If already under limit, no need to compress
+    if estimated_jpeg_size <= max_bytes {
+        let mut buf = Vec::new();
+        let mut cursor = std::io::Cursor::new(&mut buf);
+        if img.write_to(&mut cursor, ImageOutputFormat::Jpeg(90)).is_ok() {
+            if buf.len() <= max_bytes {
+                tracing::info!("Preview: kept original size, quality=90, {}KB", buf.len() / 1024);
+                return Some(buf);
+            }
+        }
+    }
+
+    // Smart scaling: calculate target dimensions to hit roughly our byte limit
+    let target_pixels = max_bytes * 15; // More aggressive estimate for preview quality
+    let scale_factor = ((target_pixels as f64) / (original_pixels as f64)).sqrt().min(1.0);
+
+    // Create scale progression from our calculated factor
+    let mut scales = Vec::new();
+    let mut current_scale = scale_factor.max(0.05); // Never go below 5%
+    scales.push(current_scale);
+
+    // Add progressively smaller scales for fallback
+    while current_scale > 0.1 {
+        current_scale *= 0.75;
+        scales.push(current_scale.max(0.05));
+    }
+
+    // Quality progression: start high, go lower
+    let qualities = [90u8, 85, 80, 75, 70, 65, 60, 55, 50, 45, 40, 35, 30, 25, 20, 15, 10];
+
+    for scale in scales {
         let target_w = (w as f32 * scale).max(1.0) as u32;
         let target_h = (h as f32 * scale).max(1.0) as u32;
-        let resized = if target_w == w && target_h == h { 
-            img.clone() 
-        } else { 
-            img.resize(target_w, target_h, FilterType::Lanczos3) 
+
+        // Skip resizing if it's the original size
+        let resized = if target_w == w && target_h == h {
+            img.clone()
+        } else {
+            img.resize(target_w, target_h, FilterType::Lanczos3)
         };
-        
-        for q in &qualities {
-            let mut buf = Vec::with_capacity(512 * 1024);
+
+        for &quality in &qualities {
+            let mut buf = Vec::with_capacity(max_bytes / 4); // Pre-allocate reasonable size
             let mut cursor = std::io::Cursor::new(&mut buf);
-            if resized.write_to(&mut cursor, ImageOutputFormat::Jpeg(*q)).is_ok() {
+
+            if resized.write_to(&mut cursor, ImageOutputFormat::Jpeg(quality)).is_ok() {
+                let size_kb = buf.len() / 1024;
                 if buf.len() <= max_bytes {
-                    tracing::info!("Preview compressed: scale={}, quality={}, size={}KB", scale, q, buf.len() / 1024);
+                    tracing::info!("Preview compressed: {}x{} → {}x{}, scale={:.2}, quality={}, size={}KB",
+                        w, h, target_w, target_h, scale, quality, size_kb);
                     return Some(buf);
+                }
+
+                // If we're getting close (within 10%), try one more quality step down
+                if buf.len() as f64 > max_bytes as f64 * 0.9 && quality > 10 {
+                    continue; // Try next lower quality
                 }
             }
         }
     }
-    
-    tracing::warn!("Could not compress image under {}MB limit", max_bytes / 1024 / 1024);
+
+    tracing::warn!("Could not compress {}x{} image under {}KB limit", w, h, max_bytes / 1024);
     None
+}
+
+fn should_generate_preview(original_path: &StdPath, preview_limit_bytes: usize) -> bool {
+    match std::fs::metadata(original_path) {
+        Ok(metadata) => {
+            let file_size = metadata.len() as usize;
+            // If original file is already small, no need for preview
+            if file_size <= preview_limit_bytes {
+                tracing::debug!("Skipping preview generation: original file is already {}KB", file_size / 1024);
+                return false;
+            }
+
+            // For very large files, always generate preview
+            if file_size > 10 * preview_limit_bytes { // >10MB
+                return true;
+            }
+
+            // For medium files, check if they're already JPEG with reasonable compression
+            if let Some(ext) = original_path.extension().and_then(|e| e.to_str()) {
+                if ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg") {
+                    // If it's already a JPEG and reasonably sized, maybe skip
+                    return file_size > 2 * preview_limit_bytes; // Only if >2MB
+                }
+            }
+        }
+        Err(_) => return true, // If we can't read metadata, assume we need preview
+    }
+    true
 }
 
 fn try_generate_preview(original_path: &StdPath, preview_path: &StdPath) -> Result<(), String> {
     let img = image::open(original_path).map_err(|e| format!("open image: {}", e))?;
-    match encode_jpeg_under_limit(&img, PREVIEW_MAX_BYTES) {
-        Some(bytes) => {
-            std::fs::write(preview_path, &bytes).map_err(|e| format!("write preview: {}", e))
-        }
-        None => {
-            // Fallback: For very large images, aggressively scale down first
-            let (w, h) = img.dimensions();
-            let pixel_count = (w as u64) * (h as u64);
-            let max_pixels = 1920u64 * 1080u64;  // Max ~2MP (1920x1080)
-            
-            let fallback_img = if pixel_count > max_pixels {
-                let scale = ((max_pixels as f32) / (pixel_count as f32)).sqrt();
-                let new_w = (w as f32 * scale).max(1.0) as u32;
-                let new_h = (h as f32 * scale).max(1.0) as u32;
-                tracing::warn!("Extreme fallback: scaling {}x{} to {}x{}", w, h, new_w, new_h);
-                img.resize(new_w, new_h, FilterType::Lanczos3)
-            } else {
-                img.clone()
-            };
-            
-            // Try to write at very low quality
+
+    // First try the smart compression
+    if let Some(bytes) = encode_jpeg_under_limit(&img, PREVIEW_MAX_BYTES) {
+        tracing::info!("Preview generated successfully: {}KB", bytes.len() / 1024);
+        return std::fs::write(preview_path, &bytes).map_err(|e| format!("write preview: {}", e));
+    }
+
+    // Fallback 1: Extreme downscaling for massive images (>50MP)
+    let (w, h) = img.dimensions();
+    let pixel_count = (w as u64) * (h as u64);
+
+    if pixel_count > 50_000_000 { // >50MP images
+        let max_pixels = 4_000_000u64; // 2K resolution max for extreme cases
+        let scale = ((max_pixels as f64) / (pixel_count as f64)).sqrt();
+        let new_w = (w as f64 * scale).max(32.0) as u32; // Minimum 32px
+        let new_h = (h as f64 * scale).max(32.0) as u32;
+
+        tracing::warn!("Extreme fallback: massive image {}MP → {}x{}", pixel_count / 1_000_000, new_w, new_h);
+
+        let fallback_img = img.resize(new_w, new_h, FilterType::Lanczos3);
+
+        // Try very low qualities on the scaled image
+        for quality in [30u8, 20, 15, 10] {
             let mut buf = Vec::new();
-            for quality in [45u8, 35, 25, 15] {
-                buf.clear();
-                let mut cur = std::io::Cursor::new(&mut buf);
-                if fallback_img.write_to(&mut cur, ImageOutputFormat::Jpeg(quality)).is_ok() {
-                    if buf.len() <= PREVIEW_MAX_BYTES {
-                        tracing::warn!("Fallback succeeded at quality={}, size={}KB", quality, buf.len() / 1024);
-                        return std::fs::write(preview_path, &buf).map_err(|e| format!("write preview: {}", e));
-                    }
+            let mut cur = std::io::Cursor::new(&mut buf);
+            if fallback_img.write_to(&mut cur, ImageOutputFormat::Jpeg(quality)).is_ok() {
+                if buf.len() <= PREVIEW_MAX_BYTES {
+                    tracing::warn!("Extreme fallback succeeded: quality={}, size={}KB", quality, buf.len() / 1024);
+                    return std::fs::write(preview_path, &buf).map_err(|e| format!("write preview: {}", e));
                 }
             }
-            
-            // Last resort: use absolute minimum
-            buf.clear();
-            let mut cur = std::io::Cursor::new(&mut buf);
-            fallback_img.write_to(&mut cur, ImageOutputFormat::Jpeg(10)).map_err(|e| format!("encode jpeg: {}", e))?;
-            tracing::warn!("Last resort fallback: quality=10, size={}KB", buf.len() / 1024);
-            std::fs::write(preview_path, &buf).map_err(|e| format!("write preview: {}", e))
         }
     }
+
+    // Fallback 2: Progressive downscaling with very low quality
+    tracing::warn!("Trying progressive downscaling fallback for {}x{}", w, h);
+
+    // Start with 25% scale and go down
+    for scale in [0.25, 0.15, 0.1, 0.05] {
+        let new_w = (w as f32 * scale).max(16.0) as u32;
+        let new_h = (h as f32 * scale).max(16.0) as u32;
+
+        let scaled_img = img.resize(new_w, new_h, FilterType::Lanczos3);
+
+        for quality in [25u8, 15, 10] {
+            let mut buf = Vec::new();
+            let mut cur = std::io::Cursor::new(&mut buf);
+            if scaled_img.write_to(&mut cur, ImageOutputFormat::Jpeg(quality)).is_ok() {
+                if buf.len() <= PREVIEW_MAX_BYTES {
+                    tracing::warn!("Progressive fallback succeeded: {}x{} scale={}, quality={}, size={}KB",
+                        new_w, new_h, scale, quality, buf.len() / 1024);
+                    return std::fs::write(preview_path, &buf).map_err(|e| format!("write preview: {}", e));
+                }
+            }
+        }
+    }
+
+    // Last resort: try to create a tiny 64x64 thumbnail at minimum quality
+    tracing::error!("All compression attempts failed, creating minimum thumbnail");
+    let tiny_img = img.resize(64, 64, FilterType::Lanczos3);
+    let mut buf = Vec::new();
+    let mut cur = std::io::Cursor::new(&mut buf);
+    tiny_img.write_to(&mut cur, ImageOutputFormat::Jpeg(5)).map_err(|e| format!("encode jpeg: {}", e))?;
+    tracing::warn!("Last resort thumbnail: 64x64, quality=5, size={}KB", buf.len() / 1024);
+    std::fs::write(preview_path, &buf).map_err(|e| format!("write preview: {}", e))
 }
 
 #[derive(Clone)]
@@ -228,7 +320,7 @@ pub async fn short_handler(State(state): State<AppState>, Path(code): Path<Strin
                             let preview_name = make_preview_filename(filename);
                             let preview_fs_path = preview_dir.join(&preview_name);
                             let preview_web_path = format!("previews/{}", preview_name);
-                            if !preview_fs_path.exists() {
+                            if !preview_fs_path.exists() && should_generate_preview(&original_fs_path, PREVIEW_MAX_BYTES) {
                                 // Generate preview asynchronously in background
                                 let orig_path = original_fs_path.clone();
                                 let prev_path = preview_fs_path.clone();
