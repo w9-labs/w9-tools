@@ -101,7 +101,14 @@ async fn main() -> anyhow::Result<()> {
         uploads_dir: uploads_dir.clone(),
     };
 
+    // File serving (no state/auth required)
+    let files_service = get_service(ServeDir::new(&uploads_dir))
+        .handle_error(|_| async { (StatusCode::INTERNAL_SERVER_ERROR, "IO Error") });
+
     let app = Router::new()
+        // File serving - public, no auth
+        .nest_service("/files", files_service)
+        // API routes
         .route("/health", get(health_check))
         // CORS preflight: explicitly handle OPTIONS on API endpoints
         .route("/api/upload", axum::routing::options(handlers::cors_preflight))
@@ -127,8 +134,7 @@ async fn main() -> anyhow::Result<()> {
                 .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
                 .allow_headers(Any)
                 .expose_headers(Any)
-        )
-        .nest_service("/files", get_service(ServeDir::new(&uploads_dir)).handle_error(|_| async { (StatusCode::INTERNAL_SERVER_ERROR, "IO Error") }));
+        );
 
     let addr: SocketAddr = format!("{}:{}", host, port).parse()
         .map_err(|e| {
