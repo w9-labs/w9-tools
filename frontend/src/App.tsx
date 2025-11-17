@@ -15,7 +15,35 @@ type ErrorResult = {
 
 type Result = SuccessResult | ErrorResult
 
+// Simple router
+function useRoute() {
+  const path = window.location.pathname
+  if (path.startsWith('/admin')) return 'admin'
+  return 'home'
+}
+
+function AdminPanel() {
+  return (
+    <div className="app">
+      <main className="container">
+        <h1>Admin Panel</h1>
+        <p>Database management interface</p>
+        <iframe
+          src="/admin/"
+          style={{ width: '100%', height: '80vh', border: 'none' }}
+          title="Admin Panel"
+        />
+      </main>
+    </div>
+  )
+}
+
 export default function App() {
+  const route = useRoute()
+
+  if (route === 'admin') {
+    return <AdminPanel />
+  }
   const [urlInput, setUrlInput] = useState('')
   const [fileInput, setFileInput] = useState<File | null>(null)
   const [generateQr, setGenerateQr] = useState(false)

@@ -58,7 +58,7 @@ echo "Building release (as user: $BUILD_USER)"
 if [ -f /etc/debian_version ]; then
   if is_enabled "$APT_INSTALL"; then
     echo "Installing system packages..."
-    APT_PKGS="build-essential pkg-config libsqlite3-dev ca-certificates curl git"
+    APT_PKGS="build-essential pkg-config libsqlite3-dev ca-certificates curl git nodejs npm"
     if is_enabled "$NGINX_ENABLE"; then
       APT_PKGS="$APT_PKGS nginx ufw"
     fi
@@ -90,11 +90,26 @@ else
   fi
 fi
 
-echo "Building release (as user: $BUILD_USER)"
+echo "Building backend release (as user: $BUILD_USER)"
 if [ "$(id -u)" -eq 0 ] && [ "$BUILD_USER" != "root" ]; then
   sudo -u "$BUILD_USER" -H bash -lc "source \"\$HOME/.cargo/env\" 2>/dev/null || true; export PATH=\"\$HOME/.cargo/bin:\$PATH\"; cd '$ROOT_DIR' && cargo build --release"
 else
   bash -lc "source \"\$HOME/.cargo/env\" 2>/dev/null || true; export PATH=\"\$HOME/.cargo/bin:\$PATH\"; cd '$ROOT_DIR' && cargo build --release"
+fi
+
+# Build frontend
+echo "Building frontend..."
+FRONTEND_DIR="$ROOT_DIR/frontend"
+FRONTEND_DIST="$FRONTEND_DIR/dist"
+FRONTEND_PUBLIC="/var/www/w9"
+if [ -d "$FRONTEND_DIR" ]; then
+  cd "$FRONTEND_DIR"
+  npm ci --prefer-offline || npm install
+  npm run build
+  echo "Frontend built to $FRONTEND_DIST"
+else
+  echo "Frontend directory not found at $FRONTEND_DIR"
+  exit 1
 fi
 
 # Determine which binary to install
@@ -144,6 +159,14 @@ sudo chmod 750 "$BIN_TARGET"
 sudo mkdir -p "$UPLOADS_DIR" "$DATA_DIR"
 sudo chown -R "$SERVICE_USER":"$SERVICE_GROUP" "$UPLOADS_DIR" "$DATA_DIR"
 sudo chmod 750 "$UPLOADS_DIR" "$DATA_DIR"
+
+# Install frontend to /var/www/w9
+echo "Installing frontend to $FRONTEND_PUBLIC"
+sudo mkdir -p "$FRONTEND_PUBLIC"
+sudo cp -r "$FRONTEND_DIST"/* "$FRONTEND_PUBLIC/"
+sudo chown -R root:root "$FRONTEND_PUBLIC"
+sudo chmod 755 "$FRONTEND_PUBLIC"
+echo "✓ Frontend installed"
 
 # Note: SSL handled by Cloudflare (no certificate management needed)
 
@@ -198,7 +221,7 @@ fi
 
 # Setup nginx (HTTP only - Cloudflare handles HTTPS)
 if is_enabled "$NGINX_ENABLE"; then
-  echo "Configuring nginx reverse proxy for $DOMAIN"
+  echo "Configuring nginx for frontend + API on $DOMAIN"
   
   sudo tee "$NGINX_SITE_PATH" > /dev/null <<NGX
 server {
@@ -206,14 +229,55 @@ server {
     server_name ${DOMAIN};
 
     client_max_body_size 1024M;
+    root /var/www/w9;
+    index index.html;
 
-    location / {
+    # API routes and uploads - proxy to backend
+    location /api/ {
         proxy_pass http://127.0.0.1:${APP_PORT};
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
         proxy_read_timeout 90s;
+    }
+
+    location /admin/ {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 90s;
+    }
+
+    location /r/ {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location /s/ {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    location /files/ {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # Frontend - serve index.html for all non-existent routes (SPA)
+    location / {
+        try_files \$uri \$uri/ /index.html;
     }
 }
 NGX
@@ -241,15 +305,24 @@ if is_enabled "$NGINX_ENABLE"; then
 fi
 
 echo ""
-echo "✓ Done! To follow logs: sudo journalctl -u $SERVICE_NAME -f"
+echo "✓ Done! Service is running."
 echo ""
 echo "========== Installation Summary =========="
-echo "Service:     $SERVICE_NAME"
 echo "Domain:      $DOMAIN"
-echo "Install:     $INSTALL_DIR/$BIN_NAME"
+echo "Backend:     $INSTALL_DIR/$BIN_NAME (port $APP_PORT)"
+echo "Frontend:    /var/www/w9"
 echo "Data:        $DATA_DIR"
 echo "Uploads:     $UPLOADS_DIR"
-echo "App Port:    $APP_PORT (internal)"
-echo "Nginx:       Port 80 → localhost:$APP_PORT"
+echo "Nginx:       Port 80"
 echo "SSL:         Cloudflare (auto)"
+echo ""
+echo "Routes:"
+echo "  /              → Frontend"
+echo "  /api/*         → Backend API"
+echo "  /admin/*       → Backend Admin"
+echo "  /r/:code       → Redirect"
+echo "  /s/:code       → Short link"
+echo "  /files/*       → Uploads"
+echo ""
+echo "View logs: sudo journalctl -u $SERVICE_NAME -f"
 echo "========================================"
