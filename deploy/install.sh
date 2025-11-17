@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Line-buffered output
+exec 1> >(stdbuf -oL cat)
+exec 2> >(stdbuf -oL cat >&2)
+
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 # Config
