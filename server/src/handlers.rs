@@ -379,13 +379,35 @@ pub async fn admin_logout(State(state): State<AppState>, cookie: Option<TypedHea
 }
 
 #[debug_handler]
-pub async fn admin_items(State(state): State<AppState>, cookie: Option<TypedHeader<Cookie>>) -> (StatusCode, String) {
+pub async fn admin_items(State(state): State<AppState>, cookie: Option<TypedHeader<Cookie>>) -> impl IntoResponse {
     if !require_admin_token(&state.db_path, extract_admin_token(cookie).as_deref()).await {
-        return (StatusCode::UNAUTHORIZED, r#"{"error":"Unauthorized"}"#.to_string());
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response();
     }
-    let conn = Connection::open(&state.db_path).unwrap();
-    let mut stmt = conn.prepare("SELECT code, kind, value, created_at FROM items ORDER BY created_at DESC LIMIT 500").unwrap();
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))).unwrap();
+    
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to open database: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"Database error"}))).into_response();
+        }
+    };
+    
+    let mut stmt = match conn.prepare("SELECT code, kind, value, created_at FROM items ORDER BY created_at DESC LIMIT 500") {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to prepare statement: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"Query error"}))).into_response();
+        }
+    };
+    
+    let rows = match stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, i64>(3)?))) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to query items: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error":"Query error"}))).into_response();
+        }
+    };
+    
     let mut items: Vec<serde_json::Value> = Vec::new();
     for row in rows {
         if let Ok((code, kind, value, created_at)) = row {
@@ -397,8 +419,8 @@ pub async fn admin_items(State(state): State<AppState>, cookie: Option<TypedHead
             }));
         }
     }
-    let body = serde_json::to_string(&items).unwrap_or_else(|_| "[]".to_string());
-    (StatusCode::OK, body)
+    
+    (StatusCode::OK, Json(items)).into_response()
 }
 
 // THIS IS THE RESTORED AND CORRECTED FUNCTION
