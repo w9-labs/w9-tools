@@ -123,7 +123,7 @@ fi
 
 # Nginx config (DRY - single source of truth with conditionals)
 echo "Configuring nginx..."
-sudo tee /etc/nginx/sites-available/$SERVICE_NAME >/dev/null <<'NGINX_EOF'
+sudo tee /etc/nginx/sites-available/$SERVICE_NAME >/dev/null <<NGINX_EOF
 # Backend proxy settings
 upstream backend {
     server 127.0.0.1:$APP_PORT;
