@@ -14,8 +14,11 @@ DOMAIN=${DOMAIN:-w9.se}
 BASE_URL=${BASE_URL:-https://$DOMAIN}
 FRONTEND_PUBLIC=/var/www/w9
 
-# Stop service
+# Stop service and kill any stuck processes
 sudo systemctl stop $SERVICE_NAME 2>/dev/null || true
+sleep 1
+sudo pkill -9 w9 2>/dev/null || true
+sleep 1
 
 # Build user
 BUILD_USER="${SUDO_USER:-$(whoami)}"
@@ -28,7 +31,8 @@ sudo apt-get install -y build-essential pkg-config libsqlite3-dev nodejs npm ngi
 # Create service user
 id -u $SERVICE_USER >/dev/null 2>&1 || sudo useradd --system --create-home --home-dir $INSTALL_DIR --shell /usr/sbin/nologin $SERVICE_USER
 
-# Build backend
+# Build backend (clean first to force rebuild)
+rm -rf "$ROOT_DIR/target/release/w9" 2>/dev/null || true
 if [ "$BUILD_USER" != "root" ]; then
   sudo -u $BUILD_USER bash -lc "cd '$ROOT_DIR' && cargo build --release"
 else
