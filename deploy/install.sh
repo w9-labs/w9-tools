@@ -339,8 +339,9 @@ NGX
   if is_enabled "$SETUP_SSL"; then
     sudo tee -a "$NGINX_SITE_PATH" > /dev/null <<NGXSSL
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
     server_name ${SERVER_NAMES};
 
     ssl_certificate $SSL_CERT;
@@ -470,6 +471,11 @@ if is_enabled "$SYSTEMD_ENABLE"; then
     echo "ERROR: Service failed to start" >&2
     sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
     echo "Check logs with: sudo journalctl -u $SERVICE_NAME -n 50" >&2
+    if command -v journalctl >/dev/null 2>&1; then
+      echo "------ Last 50 log lines ($SERVICE_NAME) ------"
+      sudo journalctl -u "$SERVICE_NAME" -n 50 --no-pager || true
+      echo "----------------------------------------------"
+    fi
     exit 1
   fi
   sudo systemctl status "$SERVICE_NAME" --no-pager -l || true
