@@ -38,12 +38,15 @@ function AdminLogin() {
     setLoading(true)
     setError(null)
     try {
-      const form = new FormData()
-      form.append('username', username)
-      form.append('password', password)
+      const params = new URLSearchParams()
+      params.append('username', username)
+      params.append('password', password)
       const resp = await fetch(adminApi('/login'), {
         method: 'POST',
-        body: form,
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: params,
         credentials: 'include'
       })
       const text = await resp.text()
