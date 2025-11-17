@@ -249,7 +249,13 @@ pub async fn short_handler(State(state): State<AppState>, Path(code): Path<Strin
                         .and_then(|v| v.to_str().ok())
                         .unwrap_or("*/*")
                         .to_ascii_lowercase();
-                    let wants_raw_image = accept.contains("image/") && !accept.contains("text/html");
+                    // Check if the primary/preferred content type is an image
+                    let wants_raw_image = accept.starts_with("image/") || 
+                                         accept.split(',')
+                                               .next()
+                                               .and_then(|first| first.split(';').next())
+                                               .map(|mime| mime.trim().starts_with("image/"))
+                                               .unwrap_or(false);
                     if wants_raw_image {
                         // For non-HTML (e.g., direct image fetch), stream the file instead of redirecting to avoid user-agent caching/transform issues
                         let fs_path = StdPath::new(&state.uploads_dir).join(filename);
