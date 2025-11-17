@@ -282,6 +282,10 @@ server {
 }
 NGX
 
+  # Remove old sites to avoid conflicts
+  sudo rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/ping0 2>/dev/null
+  
+  # Enable only the w9 site
   sudo ln -sf "$NGINX_SITE_PATH" "/etc/nginx/sites-enabled/$SERVICE_NAME"
   sudo nginx -t && echo "✓ Nginx config valid"
 

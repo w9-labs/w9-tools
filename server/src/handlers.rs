@@ -3,7 +3,7 @@
 use axum::extract::{Form, Multipart, Path, Query, State};
 use axum_extra::typed_header::TypedHeader;
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
-use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::{Html, IntoResponse, Redirect};
 use axum::Json;
 use axum::debug_handler;
 use axum_extra::headers::Cookie;
@@ -18,7 +18,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 use askama::Template;
-use w9::templates::{ImageOgTemplate, FileInfoTemplate, AdminLoginTemplate, AdminItem};
+use w9::templates::{ImageOgTemplate, FileInfoTemplate};
 use image::{imageops::FilterType, DynamicImage, ImageOutputFormat, GenericImageView};
 use sha2::{Digest, Sha256};
 use rand::{distributions::Alphanumeric, Rng};
@@ -156,9 +156,6 @@ fn try_generate_preview(original_path: &StdPath, preview_path: &StdPath) -> Resu
 #[derive(Clone)]
 pub struct AppState { pub db_path: String, pub base_url: String }
 
-#[derive(Deserialize)]
-pub struct LinkRequest { pub link: String, pub qr: Option<String> }
-
 fn is_allowed_extension(ext: &str) -> bool {
     ALLOWED_EXTENSIONS.iter().any(|&allowed| allowed.eq_ignore_ascii_case(ext))
 }
@@ -169,179 +166,6 @@ fn ensure_absolute(base: &str, url: &str) -> String {
     } else {
         format!("{}/{}", base.trim_end_matches('/'), url.trim_start_matches('/'))
     }
-}
-
-pub async fn upload_handler(State(state): State<AppState>, mut multipart: Multipart) -> impl IntoResponse {
-    while let Ok(Some(mut field)) = multipart.next_field().await {
-        let name = field.name().unwrap_or("");
-        if name == "file" {
-            let filename = field.file_name().unwrap_or("file").to_string();
-
-            let ext = StdPath::new(&filename)
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("bin");
-
-            if !is_allowed_extension(ext) {
-                tracing::warn!("Rejected file with extension: {}", ext);
-                return (StatusCode::BAD_REQUEST, format!("File type '.{}' not allowed", ext));
-            }
-
-            let id = Uuid::new_v4();
-            let filename_saved = format!("{}.{}", id, ext);
-            let path = format!("uploads/{}", filename_saved);
-            if let Err(e) = fs::create_dir_all("uploads").await {
-                tracing::error!("Failed to create uploads dir: {}", e);
-                return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create uploads directory".to_string());
-            }
-            let mut out = match tokio::fs::File::create(&path).await {
-                Ok(f) => f,
-                Err(e) => {
-                    tracing::error!("Failed to create file: {}", e);
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file".to_string());
-                }
-            };
-            let mut written: usize = 0;
-            while let Ok(Some(chunk)) = field.chunk().await {
-                written = written.saturating_add(chunk.len());
-                if written > MAX_FILE_SIZE {
-                    let _ = tokio::fs::remove_file(&path).await;
-                    return (StatusCode::PAYLOAD_TOO_LARGE, format!("File too large. Max size: {}MB", MAX_FILE_SIZE / 1024 / 1024));
-                }
-                if let Err(e) = out.write_all(&chunk).await {
-                    tracing::error!("Write error: {}", e);
-                    let _ = tokio::fs::remove_file(&path).await;
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file".to_string());
-                }
-            }
-
-            let short_code = nanoid!(8);
-            let original = format!("file:{}", filename_saved);
-            let conn = Connection::open(&state.db_path).unwrap();
-            conn.execute(
-                "INSERT INTO items(code, kind, value, created_at) VALUES (?1, ?2, ?3, strftime('%s','now'))",
-                params![short_code, "file", original],
-            ).ok();
-
-            let short_link = format!("{}/s/{}", state.base_url, short_code);
-            let qr_target = ensure_absolute(&state.base_url, &short_link);
-            let qr_svg = QrCode::new(qr_target.as_bytes())
-                .map(|c| c
-                    .render::<Color>()
-                    .min_dimensions(320, 320)
-                    .quiet_zone(true)
-                    .dark_color(Color("#000000"))
-                    .light_color(Color("#ffffff"))
-                    .build())
-                .unwrap_or_default();
-
-            let body = format!(
-                "{{\"code\":\"{}\", \"short\":\"{}\", \"file\":\"{}\", \"qr_svg\": \"{}\"}}",
-                short_code,
-                short_link,
-                filename_saved,
-                qr_svg.replace('\"', "\\\""),
-            );
-
-            tracing::info!("File uploaded successfully: {}", filename_saved);
-            return (StatusCode::OK, body);
-        }
-    }
-    (StatusCode::BAD_REQUEST, "No file provided".to_string())
-}
-
-pub async fn link_handler(State(state): State<AppState>, Form(req): Form<LinkRequest>) -> impl IntoResponse {
-    if req.link.is_empty() {
-        return (StatusCode::BAD_REQUEST, "No link provided".to_string());
-    }
-
-    if !req.link.starts_with("http://") && !req.link.starts_with("https://") {
-        return (StatusCode::BAD_REQUEST, "Invalid URL format. Must start with http:// or https://".to_string());
-    }
-
-    let short_code = nanoid!(8);
-    let conn = Connection::open(&state.db_path).unwrap();
-    conn.execute(
-        "INSERT INTO items(code, kind, value, created_at) VALUES (?1, ?2, ?3, strftime('%s','now'))",
-        params![short_code, "url", req.link],
-    ).ok();
-
-    let short_link = format!("{}/s/{}", state.base_url, short_code);
-    let qr_svg = if matches!(req.qr.as_deref(), Some("on")) {
-        let qr_target = ensure_absolute(&state.base_url, &short_link);
-        QrCode::new(qr_target.as_bytes())
-            .map(|c| c
-                .render::<Color>()
-                .min_dimensions(320, 320)
-                .quiet_zone(true)
-                .dark_color(Color("#000000"))
-                .light_color(Color("#ffffff"))
-                .build())
-            .unwrap_or_default()
-    } else {
-        String::new()
-    };
-    let body = format!(
-        "{{\"code\":\"{}\", \"short\":\"{}\", \"qr_svg\": \"{}\"}}",
-        short_code,
-        short_link,
-        qr_svg.replace('\"', "\\\""),
-    );
-
-    tracing::info!("Short link created for URL: {} -> {}", req.link, short_link);
-    (StatusCode::OK, body)
-}
-
-pub async fn submit_handler(State(state): State<AppState>, mut multipart: Multipart) -> axum::response::Response {
-    let mut link_value: Option<String> = None;
-    let mut file_bytes: Option<(String, Vec<u8>)> = None;
-    let mut want_qr: bool = false;
-
-    while let Ok(Some(field)) = multipart.next_field().await {
-        let name = field.name().unwrap_or("").to_string();
-        match name.as_str() {
-            "link" => {
-                if let Ok(text) = field.text().await { if !text.trim().is_empty() { link_value = Some(text.trim().to_string()); } }
-            }
-            "file" => {
-                if let Some(fname) = field.file_name().map(|s| s.to_string()) {
-                    if let Ok(bytes) = field.bytes().await { file_bytes = Some((fname, bytes.to_vec())); }
-                }
-            }
-            "qr" => { want_qr = true; }
-            _ => {}
-        }
-    }
-
-    if let Some((filename, data)) = file_bytes {
-        let ext = StdPath::new(&filename).extension().and_then(|e| e.to_str()).unwrap_or("bin");
-        if !is_allowed_extension(ext) { return (StatusCode::BAD_REQUEST, "File type not allowed".to_string()).into_response(); }
-        if data.len() > MAX_FILE_SIZE { return (StatusCode::PAYLOAD_TOO_LARGE, "File too large".to_string()).into_response(); }
-
-        let id = Uuid::new_v4();
-        let filename_saved = format!("{}.{}", id, ext);
-        let path = format!("uploads/{}", filename_saved);
-        if let Err(e) = fs::create_dir_all("uploads").await { tracing::error!("create uploads dir: {}", e); return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to create uploads directory".to_string()).into_response(); }
-        if let Err(e) = fs::write(&path, &data).await { tracing::error!("save file: {}", e); return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to save file".to_string()).into_response(); }
-
-        let short_code = nanoid!(8);
-        let original = format!("file:{}", filename_saved);
-        let conn = Connection::open(&state.db_path).unwrap();
-        conn.execute("INSERT INTO items(code, kind, value, created_at) VALUES (?1, ?2, ?3, strftime('%s','now'))", params![short_code, "file", original]).ok();
-        let redirect_to = format!("/r/{}?qr={}", short_code, if want_qr {"1"} else {"0"});
-        return Redirect::to(&redirect_to).into_response();
-    }
-
-    if let Some(link) = link_value {
-        if !link.starts_with("http://") && !link.starts_with("https://") { return (StatusCode::BAD_REQUEST, "Invalid URL format".to_string()).into_response(); }
-        let short_code = nanoid!(8);
-        let conn = Connection::open(&state.db_path).unwrap();
-        conn.execute("INSERT INTO items(code, kind, value, created_at) VALUES (?1, ?2, ?3, strftime('%s','now'))", params![short_code, "url", link]).ok();
-        let redirect_to = format!("/r/{}?qr={}", short_code, if want_qr {"1"} else {"0"});
-        return Redirect::to(&redirect_to).into_response();
-    }
-
-    (StatusCode::BAD_REQUEST, "Provide a URL or a file".to_string()).into_response()
 }
 
 pub async fn result_handler(State(state): State<AppState>, Path(code): Path<String>, Query(q): Query<std::collections::HashMap<String,String>>) -> (StatusCode, String) {
