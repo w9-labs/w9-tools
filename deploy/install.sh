@@ -36,6 +36,7 @@ SYSTEMD_ENABLE=${SYSTEMD_ENABLE:-1}
 NGINX_ENABLE=${NGINX_ENABLE:-1}
 BUILD_SOURCE=${BUILD_SOURCE:-auto}
 BINARY_PATH=${BINARY_PATH:-}
+SETUP_SSL=${SETUP_SSL:-1}  # Generates self-signed cert + HTTPS server for Cloudflare "Full" mode
 
 is_enabled() {
   case "${1:-}" in
@@ -58,7 +59,7 @@ echo "Building release (as user: $BUILD_USER)"
 if [ -f /etc/debian_version ]; then
   if is_enabled "$APT_INSTALL"; then
     echo "Installing system packages..."
-    APT_PKGS="build-essential pkg-config libsqlite3-dev ca-certificates curl git nodejs npm"
+    APT_PKGS="build-essential pkg-config libsqlite3-dev ca-certificates curl git nodejs npm openssl"
     if is_enabled "$NGINX_ENABLE"; then
       APT_PKGS="$APT_PKGS nginx ufw"
     fi
@@ -224,11 +225,48 @@ fi
 if is_enabled "$NGINX_ENABLE"; then
   echo "Configuring nginx for frontend + API on $DOMAIN"
   
+  SERVER_NAMES="$DOMAIN _"
+  if [[ "$DOMAIN" == www.* ]]; then
+    ROOT_DOMAIN="${DOMAIN#www.}"
+    if [ -n "$ROOT_DOMAIN" ]; then
+      SERVER_NAMES="$SERVER_NAMES $ROOT_DOMAIN"
+    fi
+  else
+    SERVER_NAMES="$SERVER_NAMES www.$DOMAIN"
+  fi
+
+  ALT_DOMAIN="${DOMAIN#www.}"
+  if [ -z "$ALT_DOMAIN" ] || [ "$ALT_DOMAIN" = "$DOMAIN" ]; then
+    ALT_DOMAIN="www.$DOMAIN"
+  fi
+
+  SSL_DIR="/etc/nginx/ssl/$DOMAIN"
+  SSL_CERT="$SSL_DIR/cert.pem"
+  SSL_KEY="$SSL_DIR/key.pem"
+  if is_enabled "$SETUP_SSL"; then
+    echo "Ensuring self-signed certificate in $SSL_DIR"
+    sudo mkdir -p "$SSL_DIR"
+    if [ ! -f "$SSL_CERT" ] || [ ! -f "$SSL_KEY" ]; then
+      echo "Generating self-signed certificate for $DOMAIN (Cloudflare Full mode support)"
+      sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout "$SSL_KEY" \
+        -out "$SSL_CERT" \
+        -subj "/CN=$DOMAIN" \
+        -addext "subjectAltName=DNS:$DOMAIN,DNS:$ALT_DOMAIN" >/dev/null 2>&1 || \
+      sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+        -keyout "$SSL_KEY" \
+        -out "$SSL_CERT" \
+        -subj "/CN=$DOMAIN"
+      sudo chmod 600 "$SSL_KEY"
+      sudo chmod 644 "$SSL_CERT"
+    fi
+  fi
+  
   sudo tee "$NGINX_SITE_PATH" > /dev/null <<NGX
 server {
     listen 80 default_server;
     listen [::]:80 default_server;
-    server_name ${DOMAIN};
+    server_name ${SERVER_NAMES};
 
     client_max_body_size 1024M;
     root $FRONTEND_PUBLIC;
@@ -249,7 +287,8 @@ server {
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header CF-Connecting-IP \$remote_addr;
         proxy_read_timeout 90s;
     }
 
@@ -258,7 +297,8 @@ server {
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header CF-Connecting-IP \$remote_addr;
         proxy_read_timeout 90s;
     }
 
@@ -267,7 +307,8 @@ server {
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header CF-Connecting-IP \$remote_addr;
     }
 
     location /s/ {
@@ -275,7 +316,8 @@ server {
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header CF-Connecting-IP \$remote_addr;
     }
 
     location /files/ {
@@ -283,7 +325,8 @@ server {
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header CF-Connecting-IP \$remote_addr;
     }
 
     # Frontend - serve index.html for all non-existent routes (SPA)
@@ -292,6 +335,86 @@ server {
     }
 }
 NGX
+
+  if is_enabled "$SETUP_SSL"; then
+    sudo tee -a "$NGINX_SITE_PATH" > /dev/null <<NGXSSL
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name ${SERVER_NAMES};
+
+    ssl_certificate $SSL_CERT;
+    ssl_certificate_key $SSL_KEY;
+    ssl_session_timeout 1d;
+    ssl_session_cache shared:SSL:10m;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+
+    client_max_body_size 1024M;
+    root $FRONTEND_PUBLIC;
+    index index.html;
+
+    location /health {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_connect_timeout 2s;
+        proxy_read_timeout 2s;
+        access_log off;
+    }
+
+    location /api/ {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header CF-Connecting-IP \$remote_addr;
+        proxy_read_timeout 90s;
+    }
+
+    location /admin/ {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header CF-Connecting-IP \$remote_addr;
+        proxy_read_timeout 90s;
+    }
+
+    location /r/ {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header CF-Connecting-IP \$remote_addr;
+    }
+
+    location /s/ {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header CF-Connecting-IP \$remote_addr;
+    }
+
+    location /files/ {
+        proxy_pass http://127.0.0.1:${APP_PORT};
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header CF-Connecting-IP \$remote_addr;
+    }
+
+    location / {
+        try_files \$uri \$uri/ /index.html;
+    }
+}
+NGXSSL
+  fi
 
   # Remove old sites to avoid conflicts
   sudo rm -f /etc/nginx/sites-enabled/default /etc/nginx/sites-enabled/ping0 2>/dev/null
