@@ -11,7 +11,7 @@ use mime_guess::from_path as mime_from_path;
 use nanoid::nanoid;
 use qrcode::render::svg::Color;
 use qrcode::QrCode;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, Error as SqliteError, ErrorCode};
 use serde::Deserialize;
 use std::path::{Path as StdPath}; // Use StdPath to avoid conflict with axum::extract::Path
 use tokio::fs;
@@ -59,6 +59,12 @@ const IMAGE_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp", 
 
 // Preview target size: strictly under 1 MiB
 const PREVIEW_MAX_BYTES: usize = 1 * 1024 * 1024;
+
+const CUSTOM_CODE_MIN_LEN: usize = 3;
+const CUSTOM_CODE_MAX_LEN: usize = 32;
+const RESERVED_CUSTOM_CODES: &[&str] = &[
+    "admin", "api", "files", "health", "robots", "sitemap", "s", "r",
+];
 
 // ensure_dir was unused; removed to avoid dead_code warning
 
@@ -249,6 +255,73 @@ pub struct AppState {
     pub db_path: String, 
     pub base_url: String,
     pub uploads_dir: String,
+}
+
+fn normalize_custom_code(raw: &str) -> Result<String, &'static str> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("Custom code cannot be empty");
+    }
+    if trimmed.len() < CUSTOM_CODE_MIN_LEN || trimmed.len() > CUSTOM_CODE_MAX_LEN {
+        return Err("Custom code must be between 3 and 32 characters");
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err("Custom code can only use letters, numbers, '-' and '_'");
+    }
+    if RESERVED_CUSTOM_CODES
+        .iter()
+        .any(|reserved| reserved.eq_ignore_ascii_case(trimmed))
+    {
+        return Err("This code is reserved");
+    }
+    Ok(trimmed.to_ascii_lowercase())
+}
+
+enum SaveItemError {
+    Database(String),
+    CodeExists,
+}
+
+fn insert_item_record(db_path: &str, code: &str, kind: &str, value: &str) -> Result<(), SaveItemError> {
+    let conn = Connection::open(db_path).map_err(|e| SaveItemError::Database(e.to_string()))?;
+    match conn.execute(
+        "INSERT INTO items(code, kind, value, created_at) VALUES (?1, ?2, ?3, strftime('%s','now'))",
+        params![code, kind, value],
+    ) {
+        Ok(_) => Ok(()),
+        Err(SqliteError::SqliteFailure(err, _)) if err.code == ErrorCode::ConstraintViolation => {
+            Err(SaveItemError::CodeExists)
+        }
+        Err(e) => Err(SaveItemError::Database(e.to_string())),
+    }
+}
+
+fn save_item(
+    db_path: &str,
+    preferred_code: Option<&String>,
+    kind: &str,
+    value: &str,
+) -> Result<String, SaveItemError> {
+    if let Some(code) = preferred_code {
+        insert_item_record(db_path, code, kind, value)?;
+        return Ok(code.clone());
+    }
+
+    for _ in 0..5 {
+        let generated = nanoid!(8);
+        match insert_item_record(db_path, &generated, kind, value) {
+            Ok(_) => return Ok(generated),
+            Err(SaveItemError::CodeExists) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+
+    Err(SaveItemError::Database(
+        "Failed to allocate unique short code".into(),
+    ))
 }
 
 fn is_allowed_extension(ext: &str) -> bool {
@@ -622,6 +695,7 @@ pub async fn api_upload(State(state): State<AppState>, mut multipart: Multipart)
     let mut link_value: Option<String> = None;
     let mut saved_filename: Option<String> = None;
     let mut qr_required: bool = false;
+    let mut custom_code_raw: Option<String> = None;
 
     while let Ok(Some(mut field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("");
@@ -649,17 +723,57 @@ pub async fn api_upload(State(state): State<AppState>, mut multipart: Multipart)
             "qr_required" => {
                 if let Ok(v) = field.text().await { qr_required = v.trim().eq_ignore_ascii_case("true"); }
             }
+            "custom_code" => {
+                if let Ok(v) = field.text().await {
+                    custom_code_raw = Some(v);
+                }
+            }
             _ => {}
         }
     }
 
+    let custom_code = match custom_code_raw {
+        Some(raw) if !raw.trim().is_empty() => match normalize_custom_code(&raw) {
+            Ok(code) => Some(code),
+            Err(msg) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"success": false, "error": msg})),
+                )
+                    .into_response()
+            }
+        },
+        _ => None,
+    };
+
     if let Some(filename_saved) = saved_filename {
-        let short_code = nanoid!(8);
-        {
-            let conn = Connection::open(&state.db_path).unwrap();
-            let original = format!("file:{}", filename_saved);
-            conn.execute("INSERT INTO items(code, kind, value, created_at) VALUES (?1, ?2, ?3, strftime('%s','now'))", params![short_code, "file", original]).ok();
-        }
+        let original = format!("file:{}", filename_saved);
+        let short_code = match save_item(&state.db_path, custom_code.as_ref(), "file", &original) {
+            Ok(code) => code,
+            Err(SaveItemError::CodeExists) => {
+                let msg = if custom_code.is_some() {
+                    "Custom code already exists"
+                } else {
+                    "Please retry generating short code"
+                };
+                return (
+                    if custom_code.is_some() {
+                        StatusCode::CONFLICT
+                    } else {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    },
+                    Json(serde_json::json!({"success": false, "error": msg})),
+                )
+                    .into_response();
+            }
+            Err(SaveItemError::Database(err)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"success": false, "error": err})),
+                )
+                    .into_response()
+            }
+        };
         let short_url = format!("{}/s/{}", state.base_url, short_code);
         let qr_code_data = if qr_required {
             let qr_target = ensure_absolute(&state.base_url, &short_url);
@@ -683,11 +797,32 @@ pub async fn api_upload(State(state): State<AppState>, mut multipart: Multipart)
 
     if let Some(link) = link_value {
         if !link.starts_with("http://") && !link.starts_with("https://") { return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"success": false, "error": "Invalid URL"}))).into_response(); }
-        let short_code = nanoid!(8);
-        {
-            let conn = Connection::open(&state.db_path).unwrap();
-            conn.execute("INSERT INTO items(code, kind, value, created_at) VALUES (?1, ?2, ?3, strftime('%s','now'))", params![short_code, "url", link]).ok();
-        }
+        let short_code = match save_item(&state.db_path, custom_code.as_ref(), "url", &link) {
+            Ok(code) => code,
+            Err(SaveItemError::CodeExists) => {
+                let msg = if custom_code.is_some() {
+                    "Custom code already exists"
+                } else {
+                    "Please retry generating short code"
+                };
+                return (
+                    if custom_code.is_some() {
+                        StatusCode::CONFLICT
+                    } else {
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    },
+                    Json(serde_json::json!({"success": false, "error": msg})),
+                )
+                    .into_response();
+            }
+            Err(SaveItemError::Database(err)) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"success": false, "error": err})),
+                )
+                    .into_response()
+            }
+        };
         let short_url = format!("{}/s/{}", state.base_url, short_code);
         let qr_code_data = if qr_required {
             let qr_target = ensure_absolute(&state.base_url, &short_url);

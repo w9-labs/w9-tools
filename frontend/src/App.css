@@ -130,3 +130,24 @@ h1 {
 
 .qr { margin-top: 0.75rem; }
 .qr img { max-width: 240px; width: 100%; height: auto; }
+
+.custom-code-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.custom-code-row .input {
+  flex: 1;
+}
+
+.code-prefix {
+  border: 2px solid var(--border);
+  padding: 0.5rem 0.75rem;
+  background: var(--bg);
+}
+
+.hint {
+  font-size: 0.8rem;
+  opacity: 0.75;
+}

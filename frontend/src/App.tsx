@@ -231,6 +231,7 @@ export default function App() {
   const [urlInput, setUrlInput] = useState('')
   const [fileInput, setFileInput] = useState<File | null>(null)
   const [generateQr, setGenerateQr] = useState(false)
+  const [customCode, setCustomCode] = useState('')
   const [isLoading, setIsLoading] = useState(false)
   const [result, setResult] = useState<SuccessResult | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -283,6 +284,11 @@ export default function App() {
     }
   }
 
+  function handleCustomCodeChange(v: string) {
+    const cleaned = v.replace(/[^a-zA-Z0-9-_]/g, '').toLowerCase()
+    setCustomCode(cleaned)
+  }
+
   async function handleSubmit(e: FormEvent) {
     e.preventDefault()
     setIsLoading(true)
@@ -304,6 +310,10 @@ export default function App() {
 
       const form = new FormData()
       form.set('qr_required', generateQr ? 'true' : 'false')
+      const trimmedCode = customCode.trim()
+      if (trimmedCode) {
+        form.set('custom_code', trimmedCode)
+      }
 
       if (hasUrl) {
         form.set('content', urlInput.trim())
@@ -389,6 +399,22 @@ export default function App() {
               onChange={(e) => handleFileChange(e.target.files?.[0] || null)}
               className="input"
             />
+          </label>
+
+          <label className="label">
+            Custom short code (optional)
+            <div className="custom-code-row">
+              <span className="code-prefix">/s/</span>
+              <input
+                type="text"
+                value={customCode}
+                onChange={(e) => handleCustomCodeChange(e.target.value)}
+                className="input"
+                placeholder="my-link"
+                maxLength={32}
+              />
+            </div>
+            <span className="hint">Letters, numbers, '-' and '_'. Minimum 3 characters.</span>
           </label>
 
           {imagePreview && (
