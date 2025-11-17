@@ -121,14 +121,9 @@ if [ ! -f "$SSL_DIR/cert.pem" ]; then
   echo "✓ Self-signed certificate created"
 fi
 
-# Nginx config (DRY - single source of truth with conditionals)
+# Nginx config
 echo "Configuring nginx..."
-sudo tee /etc/nginx/sites-available/$SERVICE_NAME >/dev/null <<NGINX_EOF
-# Backend proxy settings
-upstream backend {
-    server 127.0.0.1:$APP_PORT;
-}
-
+cat > /tmp/nginx_$SERVICE_NAME.conf << 'NGINX_EOF'
 # HTTP server (redirect to HTTPS)
 server {
     listen 80 default_server;
@@ -144,21 +139,21 @@ server {
     http2 on;
     server_name _;
 
-    ssl_certificate $SSL_DIR/cert.pem;
-    ssl_certificate_key $SSL_DIR/key.pem;
+    ssl_certificate SSL_DIR_PLACEHOLDER/cert.pem;
+    ssl_certificate_key SSL_DIR_PLACEHOLDER/key.pem;
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers HIGH:!aNULL:!MD5;
 
     client_max_body_size 1024M;
-    root $FRONTEND_PUBLIC;
+    root FRONTEND_PUBLIC_PLACEHOLDER;
     index index.html;
 
     # Backend proxies
-    location /health { proxy_pass http://127.0.0.1:$APP_PORT; }
-    location /api/ { proxy_pass http://127.0.0.1:$APP_PORT; proxy_set_header Host $host; }
-    location /r/ { proxy_pass http://127.0.0.1:$APP_PORT; proxy_set_header Host $host; }
-    location /s/ { proxy_pass http://127.0.0.1:$APP_PORT; proxy_set_header Host $host; }
-    location /files/ { proxy_pass http://127.0.0.1:$APP_PORT; proxy_set_header Host $host; }
+    location /health { proxy_pass http://127.0.0.1:APP_PORT_PLACEHOLDER; }
+    location /api/ { proxy_pass http://127.0.0.1:APP_PORT_PLACEHOLDER; proxy_set_header Host $host; }
+    location /r/ { proxy_pass http://127.0.0.1:APP_PORT_PLACEHOLDER; proxy_set_header Host $host; }
+    location /s/ { proxy_pass http://127.0.0.1:APP_PORT_PLACEHOLDER; proxy_set_header Host $host; }
+    location /files/ { proxy_pass http://127.0.0.1:APP_PORT_PLACEHOLDER; proxy_set_header Host $host; }
 
     # Frontend SPA
     location / { try_files $uri $uri/ /index.html; }
@@ -170,6 +165,15 @@ server {
     }
 }
 NGINX_EOF
+
+# Replace placeholders
+sed -i "s|SSL_DIR_PLACEHOLDER|$SSL_DIR|g" /tmp/nginx_$SERVICE_NAME.conf
+sed -i "s|FRONTEND_PUBLIC_PLACEHOLDER|$FRONTEND_PUBLIC|g" /tmp/nginx_$SERVICE_NAME.conf
+sed -i "s|APP_PORT_PLACEHOLDER|$APP_PORT|g" /tmp/nginx_$SERVICE_NAME.conf
+
+# Install config
+sudo cp /tmp/nginx_$SERVICE_NAME.conf /etc/nginx/sites-available/$SERVICE_NAME
+rm /tmp/nginx_$SERVICE_NAME.conf
 
 sudo rm -f /etc/nginx/sites-enabled/default
 sudo ln -sf /etc/nginx/sites-available/$SERVICE_NAME /etc/nginx/sites-enabled/$SERVICE_NAME
