@@ -113,8 +113,8 @@ fn encode_jpeg_under_limit(img: &DynamicImage, max_bytes: usize) -> Option<Vec<u
     let qualities = [90u8, 85, 80, 75, 70, 65, 60, 55, 50, 45, 40, 35, 30, 25, 20, 15, 10];
 
     for scale in scales {
-        let target_w = (w as f32 * scale).max(1.0) as u32;
-        let target_h = (h as f32 * scale).max(1.0) as u32;
+        let target_w = ((w as f64) * scale).max(1.0) as u32;
+        let target_h = ((h as f64) * scale).max(1.0) as u32;
 
         // Skip resizing if it's the original size
         let resized = if target_w == w && target_h == h {
@@ -216,8 +216,8 @@ fn try_generate_preview(original_path: &StdPath, preview_path: &StdPath) -> Resu
 
     // Start with 25% scale and go down
     for scale in [0.25, 0.15, 0.1, 0.05] {
-        let new_w = (w as f32 * scale).max(16.0) as u32;
-        let new_h = (h as f32 * scale).max(16.0) as u32;
+        let new_w = ((w as f64) * scale).max(16.0) as u32;
+        let new_h = ((h as f64) * scale).max(16.0) as u32;
 
         let scaled_img = img.resize(new_w, new_h, FilterType::Lanczos3);
 
