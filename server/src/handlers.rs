@@ -969,9 +969,10 @@ fn render_markdown(md: &str) -> String {
     // Protect math delimiters from markdown processing
     // Replace $...$ and $$...$$ with placeholders, then restore after markdown rendering
     let mut protected = md.to_string();
-    let mut math_expressions = Vec::new();
+    let mut math_expressions: Vec<(String, String)> = Vec::new();
     
     // Protect block math $$...$$ first (before inline $...$)
+    // Use non-greedy matching to handle multiple block math expressions
     let block_pattern = match regex::Regex::new(r"\$\$[\s\S]*?\$\$") {
         Ok(p) => p,
         Err(e) => {
@@ -983,27 +984,36 @@ fn render_markdown(md: &str) -> String {
             return html_output;
         }
     };
-    for (idx, mat) in block_pattern.find_iter(md).enumerate() {
-        // Use a code block as placeholder - markdown will preserve it exactly
+    
+    // Collect all block math matches with their positions
+    let mut block_matches: Vec<(usize, usize, String)> = block_pattern
+        .find_iter(md)
+        .map(|m| (m.start(), m.end(), m.as_str().to_string()))
+        .collect();
+    
+    // Replace block math from end to start to preserve positions
+    for (idx, (_, _, math_expr)) in block_matches.iter().enumerate().rev() {
         let placeholder = format!("```MATH_BLOCK_{}```", idx);
-        math_expressions.push((placeholder.clone(), mat.as_str().to_string()));
-        protected = protected.replacen(mat.as_str(), &placeholder, 1);
+        math_expressions.push((placeholder.clone(), math_expr.clone()));
+        protected = protected.replacen(math_expr, &placeholder, 1);
     }
     
     // Protect inline math $...$ (but not $$)
-    // Since block math is already replaced with placeholders, we can safely match $...$
-    if let Ok(inline_pattern) = regex::Regex::new(r#"\$[^$\n]+\$"#) {
+    // Match $ followed by non-$ characters (at least one) and ending with $
+    // Use a more permissive pattern that handles edge cases
+    if let Ok(inline_pattern) = regex::Regex::new(r#"\$[^$\n\r]+\$"#) {
         let mut inline_count = math_expressions.len();
-        // Collect all matches first and extract strings
-        // Block math is already replaced, so we only match actual inline math
-        let inline_matches: Vec<String> = inline_pattern.find_iter(&protected)
-            .map(|m| m.as_str().to_string())
+        // Collect all matches with their positions from the protected string
+        let mut inline_matches: Vec<(usize, usize, String)> = inline_pattern
+            .find_iter(&protected)
+            .map(|m| (m.start(), m.end(), m.as_str().to_string()))
             .collect();
-        for math_expr in inline_matches {
-            // Use inline code as placeholder - markdown will preserve it
+        
+        // Replace from end to start to preserve positions
+        for (_, _, math_expr) in inline_matches.iter().rev() {
             let placeholder = format!("`MATH_INLINE_{}`", inline_count);
             math_expressions.push((placeholder.clone(), math_expr.clone()));
-            protected = protected.replacen(&math_expr, &placeholder, 1);
+            protected = protected.replacen(math_expr, &placeholder, 1);
             inline_count += 1;
         }
     } else {
@@ -1022,23 +1032,44 @@ fn render_markdown(md: &str) -> String {
         if placeholder.starts_with("```") {
             // Block math: replace <pre><code>MATH_BLOCK_N</code></pre> with the actual math
             let code_content = placeholder.trim_start_matches("```").trim_end_matches("```");
-            let code_block_pattern = format!(r#"<pre><code[^>]*>{}</code></pre>"#, regex::escape(code_content));
-            if let Ok(re) = regex::Regex::new(&code_block_pattern) {
+            // Try multiple replacement strategies
+            let escaped_content = html_escape::encode_text(code_content);
+            
+            // Strategy 1: Direct code block replacement (most common)
+            let direct_pattern = format!(r#"<pre><code[^>]*>\s*{}\s*</code></pre>"#, regex::escape(code_content));
+            if let Ok(re) = regex::Regex::new(&direct_pattern) {
                 html_output = re.replace_all(&html_output, math_expr).to_string();
-            } else {
-                // Fallback: simple string replace
-                html_output = html_output.replace(&format!("<pre><code>{}</code></pre>", code_content), math_expr);
             }
+            
+            // Strategy 2: HTML-escaped version
+            let escaped_pattern = format!(r#"<pre><code[^>]*>\s*{}\s*</code></pre>"#, regex::escape(&escaped_content));
+            if let Ok(re) = regex::Regex::new(&escaped_pattern) {
+                html_output = re.replace_all(&html_output, math_expr).to_string();
+            }
+            
+            // Strategy 3: Simple string replace fallback
+            html_output = html_output.replace(&format!("<pre><code>{}</code></pre>", code_content), math_expr);
+            html_output = html_output.replace(&format!("<pre><code>{}</code></pre>", escaped_content), math_expr);
         } else if placeholder.starts_with('`') {
             // Inline math: replace <code>MATH_INLINE_N</code> with the actual math
             let code_content = placeholder.trim_matches('`');
-            let inline_code_pattern = format!(r#"<code[^>]*>{}</code>"#, regex::escape(code_content));
-            if let Ok(re) = regex::Regex::new(&inline_code_pattern) {
+            let escaped_content = html_escape::encode_text(code_content);
+            
+            // Strategy 1: Direct inline code replacement
+            let direct_pattern = format!(r#"<code[^>]*>\s*{}\s*</code>"#, regex::escape(code_content));
+            if let Ok(re) = regex::Regex::new(&direct_pattern) {
                 html_output = re.replace_all(&html_output, math_expr).to_string();
-            } else {
-                // Fallback: simple string replace
-                html_output = html_output.replace(&format!("<code>{}</code>", code_content), math_expr);
             }
+            
+            // Strategy 2: HTML-escaped version
+            let escaped_pattern = format!(r#"<code[^>]*>\s*{}\s*</code>"#, regex::escape(&escaped_content));
+            if let Ok(re) = regex::Regex::new(&escaped_pattern) {
+                html_output = re.replace_all(&html_output, math_expr).to_string();
+            }
+            
+            // Strategy 3: Simple string replace fallback
+            html_output = html_output.replace(&format!("<code>{}</code>", code_content), math_expr);
+            html_output = html_output.replace(&format!("<code>{}</code>", escaped_content), math_expr);
         }
     }
     
