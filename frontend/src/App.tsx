@@ -250,8 +250,10 @@ function Homepage() {
     <div className="app">
       <Header />
       <main className="container">
-        <h1>W9 Group</h1>
-        <p className="subtitle">Open source project: contribute to open-source move the world forward.</p>
+        <h1>W9 Tools — Share Fast</h1>
+        <p className="subtitle">
+          Lightweight toolkit for instant short links, markdown notepads, and upcoming converters. Open-source, privacy-conscious, always ready.
+        </p>
         <div style={{ marginTop: '2rem' }}>
           <a href="https://github.com/ShayNeeo/W9" target="_blank" rel="noreferrer" className="button" style={{ display: 'inline-block' }}>
             View on GitHub
