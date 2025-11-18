@@ -972,7 +972,17 @@ fn render_markdown(md: &str) -> String {
     let mut math_expressions = Vec::new();
     
     // Protect block math $$...$$ first (before inline $...$)
-    let block_pattern = regex::Regex::new(r"\$\$[\s\S]*?\$\$").unwrap();
+    let block_pattern = match regex::Regex::new(r"\$\$[\s\S]*?\$\$") {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("Failed to compile block math regex: {}", e);
+            // Fall back to simple markdown rendering without math protection
+            let parser = Parser::new(md);
+            let mut html_output = String::new();
+            html::push_html(&mut html_output, parser);
+            return html_output;
+        }
+    };
     for (idx, mat) in block_pattern.find_iter(md).enumerate() {
         let placeholder = format!("__MATH_EXPR_{}__", idx);
         math_expressions.push((placeholder.clone(), mat.as_str().to_string()));
@@ -980,18 +990,23 @@ fn render_markdown(md: &str) -> String {
     }
     
     // Protect inline math $...$ (but not $$)
-    // Match $...$ that are not part of $$
-    let inline_pattern = regex::Regex::new(r"(?<!\$)\$[^$\n]+\$(?!\$)").unwrap();
-    let mut inline_count = math_expressions.len();
-    // Collect all matches first and extract strings
-    let inline_matches: Vec<String> = inline_pattern.find_iter(&protected)
-        .map(|m| m.as_str().to_string())
-        .collect();
-    for math_expr in inline_matches {
-        let placeholder = format!("__MATH_EXPR_{}__", inline_count);
-        math_expressions.push((placeholder.clone(), math_expr.clone()));
-        protected = protected.replacen(&math_expr, &placeholder, 1);
-        inline_count += 1;
+    // Since block math is already replaced with placeholders, we can safely match $...$
+    // But we need to avoid matching placeholders themselves
+    if let Ok(inline_pattern) = regex::Regex::new(r#"\$[^$\n]+\$"#) {
+        let mut inline_count = math_expressions.len();
+        // Collect all matches first and extract strings
+        // Block math is already replaced, so we only match actual inline math
+        let inline_matches: Vec<String> = inline_pattern.find_iter(&protected)
+            .map(|m| m.as_str().to_string())
+            .collect();
+        for math_expr in inline_matches {
+            let placeholder = format!("__MATH_EXPR_{}__", inline_count);
+            math_expressions.push((placeholder.clone(), math_expr.clone()));
+            protected = protected.replacen(&math_expr, &placeholder, 1);
+            inline_count += 1;
+        }
+    } else {
+        tracing::warn!("Failed to compile inline math regex, continuing without inline math protection");
     }
     
     // Render markdown
@@ -1002,7 +1017,6 @@ fn render_markdown(md: &str) -> String {
     // Restore math expressions (KaTeX will render them on the client side)
     for (placeholder, math_expr) in math_expressions.iter() {
         // Preserve the math expression as-is (KaTeX will handle rendering)
-        // Only escape if it's inside HTML tags, but for now just restore it
         html_output = html_output.replace(placeholder, math_expr);
     }
     
@@ -1110,12 +1124,24 @@ pub async fn notepad_handler(State(state): State<AppState>, Path(code): Path<Str
     };
 
     let page_url = format!("{}/n/{}", state.base_url, code);
+    
+    // Render markdown with error handling
     let html_content = render_markdown(&value);
+    
     let tpl = NotepadTemplate {
         content: html_content,
         page_url,
     };
-    let html = Html(tpl.render().unwrap_or_else(|_| "Template error".to_string()));
+    
+    let rendered_html = match tpl.render() {
+        Ok(html) => html,
+        Err(e) => {
+            tracing::error!("Template rendering error for code {}: {}", code, e);
+            format!("<html><head><title>Error</title></head><body><h1>Template Error</h1><p>Failed to render notepad content.</p></body></html>")
+        }
+    };
+    
+    let html = Html(rendered_html);
     let mut response = html.into_response();
     response.headers_mut().insert(
         axum::http::header::CACHE_CONTROL,
