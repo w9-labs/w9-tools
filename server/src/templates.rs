@@ -246,6 +246,9 @@ pub struct VideoTemplate { pub filename: String, pub file_url: String, pub mime:
     <meta property="og:title" content="Notepad">
     <meta property="og:description" content="Shared Notepad">
     <meta property="og:url" content="{{ page_url }}">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css" integrity="sha384-n8MVd4RsNIU0tAv4ct0nTaAbDJwPJzDEaqSD1odI+WdtXRGWt2kTvGFasHpSy3SV" crossorigin="anonymous">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" integrity="sha384-XjKyOOlGwcjNTAIQHIpgOno0Hl1YQqzUOEleOLALmuqehneUG+vnGctmUb0ZY0l8" crossorigin="anonymous"></script>
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js" integrity="sha384-+VBxd3r6XgURycqtZ117nYw44OOcIax56Z4dCRWbxyPt0Koah1uHoK0o4+/RRE05" crossorigin="anonymous"></script>
     <style>
       *{margin:0;padding:0;box-sizing:border-box}
       body{font-family:Courier New,monospace;background:#fff;color:#000;min-height:100vh;padding:2rem}
@@ -263,6 +266,8 @@ pub struct VideoTemplate { pub filename: String, pub file_url: String, pub mime:
       .content table{border-collapse:collapse;width:100%;margin-bottom:1rem}
       .content table th,.content table td{border:1px solid #000;padding:0.5rem;color:#000}
       .content table th{background:#f5f5f5}
+      .katex{font-size:1.1em}
+      .katex-display{margin:1rem 0;text-align:center}
       .actions{margin-top:2rem;display:flex;gap:1rem}
       a{font-family:inherit;font-size:14px;padding:0.5rem 1rem;background:#000;color:#fff;text-decoration:none;border:2px solid #000}
       a:hover{background:#fff;color:#000}
@@ -276,6 +281,17 @@ pub struct VideoTemplate { pub filename: String, pub file_url: String, pub mime:
         <a href="/">← Home</a>
       </div>
     </main>
+    <script>
+      document.addEventListener("DOMContentLoaded", function() {
+        renderMathInElement(document.querySelector(".content"), {
+          delimiters: [
+            {left: "$$", right: "$$", display: true},
+            {left: "$", right: "$", display: false}
+          ],
+          throwOnError: false
+        });
+      });
+    </script>
   </body>
 </html>"#, ext = "html")]
 pub struct NotepadTemplate { pub content: String, pub page_url: String }

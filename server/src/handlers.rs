@@ -935,9 +935,43 @@ pub async fn api_upload(State(state): State<AppState>, mut multipart: Multipart)
 
 fn render_markdown(md: &str) -> String {
     use pulldown_cmark::{Parser, html};
-    let parser = Parser::new(md);
+    
+    // Protect math delimiters from markdown processing
+    // Replace $...$ and $$...$$ with placeholders, then restore after markdown rendering
+    let mut protected = md.to_string();
+    let mut math_expressions = Vec::new();
+    
+    // Protect block math $$...$$ first (before inline $...$)
+    let block_pattern = regex::Regex::new(r"\$\$[\s\S]*?\$\$").unwrap();
+    for (idx, mat) in block_pattern.find_iter(md).enumerate() {
+        let placeholder = format!("__MATH_EXPR_{}__", idx);
+        math_expressions.push((placeholder.clone(), mat.as_str().to_string()));
+        protected = protected.replacen(mat.as_str(), &placeholder, 1);
+    }
+    
+    // Protect inline math $...$ (but not $$)
+    // Match $...$ that are not part of $$
+    let inline_pattern = regex::Regex::new(r"(?<!\$)\$[^$\n]+\$(?!\$)").unwrap();
+    let mut inline_count = math_expressions.len();
+    for mat in inline_pattern.find_iter(&protected) {
+        let placeholder = format!("__MATH_EXPR_{}__", inline_count);
+        math_expressions.push((placeholder.clone(), mat.as_str().to_string()));
+        protected = protected.replacen(mat.as_str(), &placeholder, 1);
+        inline_count += 1;
+    }
+    
+    // Render markdown
+    let parser = Parser::new(&protected);
     let mut html_output = String::new();
     html::push_html(&mut html_output, parser);
+    
+    // Restore math expressions (KaTeX will render them on the client side)
+    for (placeholder, math_expr) in math_expressions.iter() {
+        // Preserve the math expression as-is (KaTeX will handle rendering)
+        // Only escape if it's inside HTML tags, but for now just restore it
+        html_output = html_output.replace(placeholder, math_expr);
+    }
+    
     html_output
 }
 

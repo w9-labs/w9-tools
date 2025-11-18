@@ -26,3 +26,5 @@ rand = "0.8"
 hex = "0.4"
 axum-extra = { version = "0.9", features = ["typed-header"] }
 pulldown-cmark = "0.9"
+regex = "1.10"
+html-escape = "0.2"

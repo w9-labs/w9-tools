@@ -59,16 +59,70 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("Failed to open database at {}: {}", db_path, e);
             anyhow::anyhow!("Database error: {}", e)
         })?;
+    // Check if table exists and needs migration
+    let needs_migration = {
+        let table_info: Result<String, _> = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='items'",
+            [],
+            |r| r.get(0),
+        );
+        match table_info {
+            Ok(sql) => !sql.contains("PRIMARY KEY (code, kind)"),
+            Err(_) => false, // Table doesn't exist, will be created with correct schema
+        }
+    };
+
+    if needs_migration {
+        tracing::info!("Migrating items table to support composite primary key...");
+        // Create new table with correct schema
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS items_new (
+                code TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                value TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (code, kind)
+            );
+            CREATE INDEX IF NOT EXISTS idx_items_code_new ON items_new(code);
+            "#,
+        )?;
+        
+        // Copy data from old table to new table
+        // Handle potential duplicates by keeping the first occurrence
+        conn.execute(
+            r#"
+            INSERT OR IGNORE INTO items_new (code, kind, value, created_at)
+            SELECT code, kind, value, created_at FROM items
+            "#,
+            [],
+        )?;
+        
+        // Drop old table and rename new one
+        conn.execute("DROP TABLE items", [])?;
+        conn.execute("ALTER TABLE items_new RENAME TO items", [])?;
+        conn.execute("DROP INDEX IF EXISTS idx_items_code_new", [])?;
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_code ON items(code)", [])?;
+        
+        tracing::info!("Migration completed successfully");
+    } else {
+        // Create table with correct schema if it doesn't exist
+        conn.execute_batch(
+            r#"
+            CREATE TABLE IF NOT EXISTS items (
+                code TEXT NOT NULL,
+                kind TEXT NOT NULL,        -- 'url' | 'file' | 'notepad'
+                value TEXT NOT NULL,       -- url or 'file:filename' or markdown content
+                created_at INTEGER NOT NULL,
+                PRIMARY KEY (code, kind)
+            );
+            CREATE INDEX IF NOT EXISTS idx_items_code ON items(code);
+            "#,
+        )?;
+    }
+    
     conn.execute_batch(
         r#"
-        CREATE TABLE IF NOT EXISTS items (
-            code TEXT NOT NULL,
-            kind TEXT NOT NULL,        -- 'url' | 'file' | 'notepad'
-            value TEXT NOT NULL,       -- url or 'file:filename' or markdown content
-            created_at INTEGER NOT NULL,
-            PRIMARY KEY (code, kind)
-        );
-        CREATE INDEX IF NOT EXISTS idx_items_code ON items(code);
         CREATE TABLE IF NOT EXISTS admin (
             id INTEGER PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
