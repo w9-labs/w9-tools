@@ -351,10 +351,19 @@ fn ensure_absolute(base: &str, url: &str) -> String {
 }
 
 pub async fn result_handler(State(state): State<AppState>, Path(code): Path<String>, Query(q): Query<std::collections::HashMap<String,String>>) -> (StatusCode, String) {
-    let conn = Connection::open(&state.db_path).unwrap();
-    let mut stmt = conn.prepare("SELECT kind, value FROM items WHERE code = ?1").unwrap();
-    let row = stmt.query_row(params![code.clone()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
-    let (_kind, _value) = match row { Ok(v) => v, Err(_) => return (StatusCode::NOT_FOUND, r#"{"error":"Not found"}"#.to_string()) };
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, r#"{"error":"Database error"}"#.to_string()),
+    };
+    // Get any item with this code (for backward compatibility with /r/ endpoint)
+    let mut stmt = match conn.prepare("SELECT kind, value FROM items WHERE code = ?1 LIMIT 1") {
+        Ok(s) => s,
+        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, r#"{"error":"Database error"}"#.to_string()),
+    };
+    let (_kind, _value) = match stmt.query_row(params![code.clone()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+        Ok(v) => v,
+        Err(_) => return (StatusCode::NOT_FOUND, r#"{"error":"Not found"}"#.to_string()),
+    };
     let short_link = format!("{}/s/{}", state.base_url, code);
     let qr_svg = if q.get("qr").map(|v| v=="1").unwrap_or(false) {
         let qr_target = ensure_absolute(&state.base_url, &short_link);
@@ -379,10 +388,31 @@ pub async fn result_handler(State(state): State<AppState>, Path(code): Path<Stri
 
 pub async fn short_handler(State(state): State<AppState>, Path(code): Path<String>, headers: HeaderMap) -> axum::response::Response {
     let (kind, value) = {
-        let conn = Connection::open(&state.db_path).unwrap();
-        let mut stmt = conn.prepare("SELECT kind, value FROM items WHERE code = ?1").unwrap();
-        let row = stmt.query_row(params![code.clone()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
-        match row { Ok(v) => v, Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response() }
+        let conn = match Connection::open(&state.db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to open database: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
+            }
+        };
+        // Try to get url or file (not notepad) - /s/ is for short links
+        let mut stmt = match conn.prepare("SELECT kind, value FROM items WHERE code = ?1 AND kind IN ('url', 'file') LIMIT 1") {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to prepare statement: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
+            }
+        };
+        match stmt.query_row(params![code.clone()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return (StatusCode::NOT_FOUND, "Not found").into_response();
+            }
+            Err(e) => {
+                tracing::error!("Database query error: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
+            }
+        }
     };
 
     match kind.as_str() {
@@ -1052,19 +1082,32 @@ pub async fn api_notepad(State(state): State<AppState>, mut multipart: Multipart
 }
 
 pub async fn notepad_handler(State(state): State<AppState>, Path(code): Path<String>) -> axum::response::Response {
-    let (kind, value) = {
-        let conn = Connection::open(&state.db_path).unwrap();
-        let mut stmt = conn.prepare("SELECT kind, value FROM items WHERE code = ?1").unwrap();
-        let row = stmt.query_row(params![code.clone()], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)));
-        match row {
+    let value = {
+        let conn = match Connection::open(&state.db_path) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::error!("Failed to open database: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
+            }
+        };
+        let mut stmt = match conn.prepare("SELECT value FROM items WHERE code = ?1 AND kind = ?2") {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("Failed to prepare statement: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
+            }
+        };
+        match stmt.query_row(params![code.clone(), "notepad"], |r| r.get::<_, String>(0)) {
             Ok(v) => v,
-            Err(_) => return (StatusCode::NOT_FOUND, "Not found").into_response(),
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                return (StatusCode::NOT_FOUND, "Not found").into_response();
+            }
+            Err(e) => {
+                tracing::error!("Database query error: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "Database error").into_response();
+            }
         }
     };
-
-    if kind != "notepad" {
-        return (StatusCode::NOT_FOUND, "Not found").into_response();
-    }
 
     let page_url = format!("{}/n/{}", state.base_url, code);
     let html_content = render_markdown(&value);
