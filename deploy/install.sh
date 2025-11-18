@@ -74,7 +74,7 @@ fi
 
 if [ -d "$ROOT_DIR/frontend/dist" ]; then
     DIST_TIME=$(stat -c %Y "$ROOT_DIR/frontend/dist" 2>/dev/null || echo 0)
-    NEWEST_FE=$(find "$ROOT_DIR/frontend/src" "$ROOT_DIR/frontend/index.html" -type f 2>/dev/null | xargs stat -c %Y 2>/dev/null | sort -n | tail -1)
+    NEWEST_FE=$(find "$ROOT_DIR/frontend/src" "$ROOT_DIR/frontend/public" "$ROOT_DIR/frontend/index.html" "$ROOT_DIR/frontend/package.json" "$ROOT_DIR/frontend/vite.config.ts" -type f 2>/dev/null | xargs stat -c %Y 2>/dev/null | sort -n | tail -1)
     [ "$NEWEST_FE" -lt "$DIST_TIME" ] && FRONTEND_NEEDS_BUILD=false
 fi
 
