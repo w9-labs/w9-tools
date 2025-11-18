@@ -680,7 +680,7 @@ pub async fn admin_delete_item_with_kind(
     // Query needed info inside a short-lived DB connection
     let items_to_delete: Vec<(String, String)> = {
         let conn = Connection::open(&state.db_path).unwrap();
-        let query = if let Some(kind) = &kind_to_delete {
+        if let Some(kind) = &kind_to_delete {
             conn.prepare("SELECT kind, value FROM items WHERE code = ?1 AND kind = ?2")
                 .and_then(|mut stmt| {
                     stmt.query_map(params![code_to_delete, kind], |r| {
@@ -740,7 +740,6 @@ pub async fn admin_delete_item(
     
     // For backward compatibility, delete all items with this code
     let code_to_delete = code;
-    let kind_to_delete: Option<String> = None;
 
     // Query needed info inside a short-lived DB connection
     let items_to_delete: Vec<(String, String)> = {
@@ -784,7 +783,7 @@ pub async fn api_upload(State(state): State<AppState>, mut multipart: Multipart)
     let mut qr_required: bool = false;
     let mut custom_code_raw: Option<String> = None;
 
-    while let Ok(Some(mut field)) = multipart.next_field().await {
+    while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("");
         match name {
             "content" => {
@@ -947,7 +946,7 @@ pub async fn api_notepad(State(state): State<AppState>, mut multipart: Multipart
     let mut content: Option<String> = None;
     let mut custom_code_raw: Option<String> = None;
 
-    while let Ok(Some(mut field)) = multipart.next_field().await {
+    while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("");
         match name {
             "content" => {
