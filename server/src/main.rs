@@ -62,11 +62,13 @@ async fn main() -> anyhow::Result<()> {
     conn.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS items (
-            code TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,        -- 'url' | 'file'
-            value TEXT NOT NULL,       -- url or 'file:filename'
-            created_at INTEGER NOT NULL
+            code TEXT NOT NULL,
+            kind TEXT NOT NULL,        -- 'url' | 'file' | 'notepad'
+            value TEXT NOT NULL,       -- url or 'file:filename' or markdown content
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (code, kind)
         );
+        CREATE INDEX IF NOT EXISTS idx_items_code ON items(code);
         CREATE TABLE IF NOT EXISTS admin (
             id INTEGER PRIMARY KEY,
             username TEXT NOT NULL UNIQUE,
@@ -123,6 +125,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/admin/login", post(handlers::admin_login_post))
         .route("/api/admin/logout", post(handlers::admin_logout))
         .route("/api/admin/items", get(handlers::admin_items))
+        .route("/api/admin/items/:code/:kind", post(handlers::admin_delete_item_with_kind))
         .route("/api/admin/items/:code", post(handlers::admin_delete_item))
         .with_state(app_state)
         // Set individual field limit to 1 GiB for multipart uploads

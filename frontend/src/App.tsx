@@ -149,11 +149,11 @@ function AdminPanel() {
     }
   }
 
-  const handleDelete = async (code: string) => {
-    if (!confirm(`Delete item ${code}?`)) return
-    setDeletingCode(code)
+  const handleDelete = async (code: string, kind: string) => {
+    if (!confirm(`Delete ${kind} item ${code}?`)) return
+    setDeletingCode(`${code}:${kind}`)
     try {
-      const resp = await fetch(adminApi(`/items/${code}`), {
+      const resp = await fetch(adminApi(`/items/${code}/${kind}`), {
         method: 'POST',
         credentials: 'include'
       })
@@ -162,7 +162,7 @@ function AdminPanel() {
         return
       }
       if (resp.ok) {
-        setItems(items.filter((i: any) => i.code !== code))
+        setItems(items.filter((i: any) => !(i.code === code && i.kind === kind)))
       } else {
         throw new Error(`Failed to delete: HTTP ${resp.status}`)
       }
@@ -220,18 +220,18 @@ function AdminPanel() {
                 <tr><td colSpan={4} style={{ padding: '8px', textAlign: 'center' }}>No items</td></tr>
               ) : (
                 items.map((item: any) => (
-                  <tr key={item.code}>
+                  <tr key={`${item.code}:${item.kind}`}>
                     <td style={{ border: '1px solid #ddd', padding: '8px' }}>{item.code}</td>
                     <td style={{ border: '1px solid #ddd', padding: '8px' }}>{item.kind}</td>
                     <td style={{ border: '1px solid #ddd', padding: '8px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.value}</td>
                     <td style={{ border: '1px solid #ddd', padding: '8px' }}>
                       <button
-                        onClick={() => handleDelete(item.code)}
+                        onClick={() => handleDelete(item.code, item.kind)}
                         className="button"
                         style={{ fontSize: '12px' }}
-                        disabled={deletingCode === item.code}
+                        disabled={deletingCode === `${item.code}:${item.kind}`}
                       >
-                        {deletingCode === item.code ? 'Deleting...' : 'Delete'}
+                        {deletingCode === `${item.code}:${item.kind}` ? 'Deleting...' : 'Delete'}
                       </button>
                     </td>
                   </tr>

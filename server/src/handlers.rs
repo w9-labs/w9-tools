@@ -285,7 +285,21 @@ enum SaveItemError {
     CodeExists,
 }
 
+fn code_exists_for_kind(db_path: &str, code: &str, kind: &str) -> bool {
+    if let Ok(conn) = Connection::open(db_path) {
+        if let Ok(mut stmt) = conn.prepare("SELECT 1 FROM items WHERE code = ?1 AND kind = ?2 LIMIT 1") {
+            return stmt.query_row(params![code, kind], |_| Ok(())).is_ok();
+        }
+    }
+    false
+}
+
 fn insert_item_record(db_path: &str, code: &str, kind: &str, value: &str) -> Result<(), SaveItemError> {
+    // Check if code already exists for this specific kind
+    if code_exists_for_kind(db_path, code, kind) {
+        return Err(SaveItemError::CodeExists);
+    }
+    
     let conn = Connection::open(db_path).map_err(|e| SaveItemError::Database(e.to_string()))?;
     match conn.execute(
         "INSERT INTO items(code, kind, value, created_at) VALUES (?1, ?2, ?3, strftime('%s','now'))",
@@ -651,25 +665,45 @@ pub async fn admin_items(State(state): State<AppState>, cookie: Option<TypedHead
 }
 
 #[debug_handler]
-pub async fn admin_delete_item(
+pub async fn admin_delete_item_with_kind(
     State(state): State<AppState>,
-    Path(code): Path<String>,
+    Path((code, kind)): Path<(String, String)>,
     cookie: Option<TypedHeader<Cookie>>,
 ) -> impl IntoResponse {
     if !require_admin_token(&state.db_path, extract_admin_token(cookie).as_deref()).await {
         return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response();
     }
-    // Query needed info inside a short-lived DB connection (avoid holding Connection across awaits)
-    let kind_value: Option<(String, String)> = {
+    
+    let code_to_delete = code;
+    let kind_to_delete = Some(kind);
+
+    // Query needed info inside a short-lived DB connection
+    let items_to_delete: Vec<(String, String)> = {
         let conn = Connection::open(&state.db_path).unwrap();
-        conn.query_row(
-            "SELECT kind, value FROM items WHERE code = ?1",
-            params![code.clone()],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        ).ok()
+        let query = if let Some(kind) = &kind_to_delete {
+            conn.prepare("SELECT kind, value FROM items WHERE code = ?1 AND kind = ?2")
+                .and_then(|mut stmt| {
+                    stmt.query_map(params![code_to_delete, kind], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })
+                    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                })
+                .unwrap_or_default()
+        } else {
+            // If no kind specified, get all items with this code (for backward compatibility)
+            conn.prepare("SELECT kind, value FROM items WHERE code = ?1")
+                .and_then(|mut stmt| {
+                    stmt.query_map(params![code_to_delete], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    })
+                    .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+                })
+                .unwrap_or_default()
+        }
     };
 
-    if let Some((kind, value)) = kind_value {
+    // Delete associated files for file items
+    for (kind, value) in &items_to_delete {
         if kind == "file" {
             if let Some(fname) = value.strip_prefix("file:") {
                 let path_to_delete = std::path::PathBuf::from(&state.uploads_dir).join(fname);
@@ -681,10 +715,63 @@ pub async fn admin_delete_item(
         }
     }
 
-    // Now delete the DB row in a fresh connection
+    // Now delete the DB row(s) in a fresh connection
     {
         let conn = Connection::open(&state.db_path).unwrap();
-        let _ = conn.execute("DELETE FROM items WHERE code = ?1", params![code]);
+        if let Some(kind) = &kind_to_delete {
+            let _ = conn.execute("DELETE FROM items WHERE code = ?1 AND kind = ?2", params![code_to_delete, kind]);
+        } else {
+            // Delete all items with this code (backward compatibility)
+            let _ = conn.execute("DELETE FROM items WHERE code = ?1", params![code_to_delete]);
+        }
+    }
+    (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
+}
+
+#[debug_handler]
+pub async fn admin_delete_item(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    cookie: Option<TypedHeader<Cookie>>,
+) -> impl IntoResponse {
+    if !require_admin_token(&state.db_path, extract_admin_token(cookie).as_deref()).await {
+        return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"Unauthorized"}))).into_response();
+    }
+    
+    // For backward compatibility, delete all items with this code
+    let code_to_delete = code;
+    let kind_to_delete: Option<String> = None;
+
+    // Query needed info inside a short-lived DB connection
+    let items_to_delete: Vec<(String, String)> = {
+        let conn = Connection::open(&state.db_path).unwrap();
+        conn.prepare("SELECT kind, value FROM items WHERE code = ?1")
+            .and_then(|mut stmt| {
+                stmt.query_map(params![code_to_delete], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
+                .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            })
+            .unwrap_or_default()
+    };
+
+    // Delete associated files for file items
+    for (kind, value) in &items_to_delete {
+        if kind == "file" {
+            if let Some(fname) = value.strip_prefix("file:") {
+                let path_to_delete = std::path::PathBuf::from(&state.uploads_dir).join(fname);
+                let _ = tokio::fs::remove_file(&path_to_delete).await;
+                let preview_name = make_preview_filename(fname);
+                let preview_path = std::path::PathBuf::from(&state.uploads_dir).join("previews").join(preview_name);
+                let _ = tokio::fs::remove_file(preview_path).await;
+            }
+        }
+    }
+
+    // Now delete the DB row(s) in a fresh connection
+    {
+        let conn = Connection::open(&state.db_path).unwrap();
+        let _ = conn.execute("DELETE FROM items WHERE code = ?1", params![code_to_delete]);
     }
     (StatusCode::OK, Json(serde_json::json!({"success": true}))).into_response()
 }
