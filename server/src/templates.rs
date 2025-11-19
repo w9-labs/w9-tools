@@ -290,10 +290,10 @@ pub struct VideoTemplate { pub filename: String, pub file_url: String, pub mime:
     <script>
       document.addEventListener("DOMContentLoaded", function() {
         const content = document.querySelector(".content");
-        const katexReady = window.katex && typeof window.katex.render === "function";
+        let katexRendered = false;
 
         function renderDollarMath(root) {
-          if (!root || !katexReady) {
+          if (!root) {
             return;
           }
 
@@ -355,16 +355,27 @@ pub struct VideoTemplate { pub filename: String, pub file_url: String, pub mime:
           });
         }
 
-        const latexBlocks = content ? content.querySelectorAll("pre code.language-latex, pre code.latex") : [];
-        latexBlocks.forEach(function(codeBlock) {
-          const tex = codeBlock.textContent || "";
-          const pre = codeBlock.parentElement;
-          if (!pre) {
+        function processKaTeX() {
+          if (katexRendered) {
             return;
           }
-          const container = document.createElement("div");
-          container.className = "katex-display";
-          if (window.katex && typeof window.katex.render === "function") {
+          if (!(window.katex && typeof window.katex.render === "function")) {
+            setTimeout(processKaTeX, 50);
+            return;
+          }
+          if (!content) {
+            return;
+          }
+
+          const latexBlocks = content.querySelectorAll("pre code.language-latex, pre code.latex");
+          latexBlocks.forEach(function(codeBlock) {
+            const tex = codeBlock.textContent || "";
+            const pre = codeBlock.parentElement;
+            if (!pre) {
+              return;
+            }
+            const container = document.createElement("div");
+            container.className = "katex-display";
             try {
               window.katex.render(tex, container, { displayMode: true, throwOnError: false });
             } catch (err) {
@@ -373,15 +384,9 @@ pub struct VideoTemplate { pub filename: String, pub file_url: String, pub mime:
               fallback.textContent = tex;
               container.replaceChildren(fallback);
             }
-          } else {
-            const fallback = document.createElement("pre");
-            fallback.textContent = tex;
-            container.replaceChildren(fallback);
-          }
-          pre.replaceWith(container);
-        });
+            pre.replaceWith(container);
+          });
 
-        if (content && katexReady) {
           const preBlocks = content.querySelectorAll("pre");
           preBlocks.forEach(function(pre) {
             const code = pre.querySelector("code");
@@ -403,9 +408,12 @@ pub struct VideoTemplate { pub filename: String, pub file_url: String, pub mime:
             }
             pre.replaceWith(container);
           });
+
+          renderDollarMath(content);
+          katexRendered = true;
         }
 
-        renderDollarMath(content);
+        processKaTeX();
 
         const mermaidBlocks = content ? content.querySelectorAll("pre code.language-mermaid, pre code.mermaid") : [];
         if (mermaidBlocks.length > 0) {
