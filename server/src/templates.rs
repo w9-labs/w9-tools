@@ -329,14 +329,15 @@ pub struct VideoTemplate { pub filename: String, pub file_url: String, pub mime:
 
         const katexReady = window.katex && typeof window.katex.render === "function";
         if (content && katexReady) {
-          const genericBlocks = content.querySelectorAll("pre code:not(.language-mermaid):not(.mermaid):not(.language-latex):not(.latex)");
-          genericBlocks.forEach(function(codeBlock) {
-            const tex = (codeBlock.textContent || "").trim();
-            if (!tex.startsWith("$$") || !tex.endsWith("$$")) {
+          const preBlocks = content.querySelectorAll("pre");
+          preBlocks.forEach(function(pre) {
+            const code = pre.querySelector("code");
+            if (code && (code.classList.contains("language-mermaid") || code.classList.contains("mermaid") || code.classList.contains("language-latex") || code.classList.contains("latex"))) {
               return;
             }
-            const pre = codeBlock.parentElement;
-            if (!pre) {
+            const rawText = (code ? code.textContent : pre.textContent) || "";
+            const tex = rawText.trim();
+            if (!tex.startsWith("$$") || !tex.endsWith("$$")) {
               return;
             }
             const container = document.createElement("div");
