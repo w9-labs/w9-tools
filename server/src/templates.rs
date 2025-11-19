@@ -288,7 +288,7 @@ pub struct VideoTemplate { pub filename: String, pub file_url: String, pub mime:
       </div>
     </main>
     <script>
-      document.addEventListener("DOMContentLoaded", function() {
+      function bootstrapNotepadEnhancements() {
         const content = document.querySelector(".content");
         let katexRendered = false;
 
@@ -447,7 +447,13 @@ pub struct VideoTemplate { pub filename: String, pub file_url: String, pub mime:
             console.warn("Mermaid script not available, diagrams left as code blocks.");
           }
         }
-      });
+      }
+
+      if (document.readyState === "complete") {
+        bootstrapNotepadEnhancements();
+      } else {
+        window.addEventListener("load", bootstrapNotepadEnhancements, { once: true });
+      }
     </script>
   </body>
 </html>"#, ext = "html")]
