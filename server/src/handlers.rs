@@ -992,10 +992,10 @@ fn render_markdown(md: &str) -> String {
         .collect();
     
     // Replace block math from end to start to preserve positions
-    for (idx, (_, _, math_expr)) in block_matches.iter().enumerate().rev() {
+    for (idx, (start, end, math_expr)) in block_matches.iter().enumerate().rev() {
         let placeholder = format!("```MATH_BLOCK_{}```", idx);
         math_expressions.push((placeholder.clone(), math_expr.clone()));
-        protected = protected.replacen(math_expr, &placeholder, 1);
+        protected.replace_range(*start..*end, &placeholder);
     }
     
     // Protect inline math $...$ (but not $$)
@@ -1010,10 +1010,10 @@ fn render_markdown(md: &str) -> String {
             .collect();
         
         // Replace from end to start to preserve positions
-        for (_, _, math_expr) in inline_matches.iter().rev() {
+        for (start, end, math_expr) in inline_matches.iter().rev() {
             let placeholder = format!("`MATH_INLINE_{}`", inline_count);
             math_expressions.push((placeholder.clone(), math_expr.clone()));
-            protected = protected.replacen(math_expr, &placeholder, 1);
+            protected.replace_range(*start..*end, &placeholder);
             inline_count += 1;
         }
     } else {
