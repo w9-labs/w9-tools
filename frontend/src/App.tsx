@@ -52,6 +52,7 @@ function useRoute() {
   if (path === '/login') return 'login'
   if (path === '/register') return 'register'
   if (path === '/verify' || path === '/verify-email') return 'verify'
+  if (path === '/reset-password') return 'reset-password'
   if (path === '/profile') return 'profile'
   if (path === '/short' || path.startsWith('/short/')) return 'shorts'
   if (path === '/note' || path.startsWith('/note')) return 'note'
@@ -1603,6 +1604,128 @@ function VerifyPage() {
   )
 }
 
+function ResetPasswordPage() {
+  const [token, setToken] = useState<string | null>(null)
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  useEffect(() => {
+    const urlToken = new URLSearchParams(window.location.search).get('token')
+    if (!urlToken) {
+      setError('Missing reset token. Please use the link from your email.')
+      return
+    }
+    setToken(urlToken)
+  }, [])
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault()
+    if (!token) {
+      setError('Missing reset token.')
+      return
+    }
+    
+    if (newPassword !== confirmPassword) {
+      setError('Passwords do not match')
+      return
+    }
+    
+    if (newPassword.length < 8) {
+      setError('Password must be at least 8 characters')
+      return
+    }
+
+    setLoading(true)
+    setError(null)
+    
+    try {
+      const resp = await fetch(joinUrl(API_BASE, '/api/auth/confirm-password-reset'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token,
+          new_password: newPassword,
+          confirm_password: confirmPassword
+        })
+      })
+      const data = await resp.json()
+      if (resp.ok) {
+        setSuccess(true)
+        setTimeout(() => {
+          window.location.href = '/login'
+        }, 2000)
+      } else {
+        setError(data.error || 'Failed to reset password')
+      }
+    } catch (err: any) {
+      setError(err?.message || 'Failed to reset password')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="app">
+      <Header />
+      <div className="page-shell">
+        <main className="panel" style={{ maxWidth: '480px' }}>
+          <h1>Reset Password</h1>
+          {success ? (
+            <>
+              <p className="subtitle">Password reset successfully! Redirecting to login...</p>
+            </>
+          ) : !token ? (
+            <>
+              <p className="subtitle" style={{ color: 'var(--error)' }}>{error || 'Invalid reset link'}</p>
+              <a href="/login" className="button" style={{ marginTop: '1rem', display: 'inline-block' }}>
+                Back to login
+              </a>
+            </>
+          ) : (
+            <>
+              <p className="subtitle">Enter your new password</p>
+              <form onSubmit={handleSubmit} className="form">
+                <label className="label">
+                  New Password
+                  <input
+                    type="password"
+                    value={newPassword}
+                    onChange={(e) => setNewPassword(e.target.value)}
+                    className="input"
+                    required
+                    minLength={8}
+                    placeholder="At least 8 characters"
+                  />
+                </label>
+                <label className="label">
+                  Confirm New Password
+                  <input
+                    type="password"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    className="input"
+                    required
+                    minLength={8}
+                    placeholder="Re-enter your password"
+                  />
+                </label>
+                {error && <div className="error">{error}</div>}
+                <button type="submit" className="button" disabled={loading}>
+                  {loading ? 'Resetting...' : 'Reset Password'}
+                </button>
+              </form>
+            </>
+          )}
+        </main>
+      </div>
+      <Footer />
+    </div>
+  )
+}
+
 function ProfilePage() {
   const [items, setItems] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
@@ -1995,6 +2118,9 @@ export default function App() {
   }
   if (route === 'verify') {
     return <VerifyPage />
+  }
+  if (route === 'reset-password') {
+    return <ResetPasswordPage />
   }
   if (route === 'profile') {
     return <ProfilePage />

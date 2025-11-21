@@ -284,6 +284,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/auth/login", post(handlers::login))
         .route("/api/auth/register", post(handlers::register))
         .route("/api/auth/password-reset", post(handlers::request_password_reset))
+        .route("/api/auth/confirm-password-reset", post(handlers::confirm_password_reset))
         .route("/api/auth/verify-email", post(handlers::verify_email_token))
         .route("/api/auth/change-password", post(handlers::change_password))
         // User profile endpoints
