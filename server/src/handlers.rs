@@ -7,13 +7,14 @@ use axum::Json;
 use axum::debug_handler;
 use axum::async_trait;
 use axum::extract::FromRequestParts;
-use jsonwebtoken::{decode, DecodingKey, Validation};
+use chrono::{Duration, Utc};
+use jsonwebtoken::{decode, DecodingKey, Validation, encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use mime_guess::from_path as mime_from_path;
 use nanoid::nanoid;
 use qrcode::render::svg::Color;
 use qrcode::QrCode;
-use rusqlite::{params, Connection, Error as SqliteError, ErrorCode};
+use rusqlite::{params, Connection, Error as SqliteError, ErrorCode, OptionalExtension};
 use std::path::{Path as StdPath}; // Use StdPath to avoid conflict with axum::extract::Path
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -251,6 +252,172 @@ pub struct AppState {
     pub uploads_dir: String,
     pub w9_mail_api_url: String,
     pub jwt_secret: String,
+    pub email_from_address: String,
+    pub password_reset_base_url: String,
+    pub w9_mail_api_token: Option<String>,
+}
+
+const PASSWORD_MIN_LEN: usize = 8;
+const PASSWORD_RESET_TOKEN_TTL_HOURS: i64 = 24;
+
+#[derive(Debug, Clone)]
+struct UserRecord {
+    id: String,
+    email: String,
+    password_hash: String,
+    salt: String,
+    role: String,
+    must_change_password: bool,
+}
+
+fn normalize_email(raw: &str) -> Result<String, &'static str> {
+    let trimmed = raw.trim().to_ascii_lowercase();
+    if trimmed.is_empty() {
+        return Err("Email is required");
+    }
+    if !trimmed.contains('@') || trimmed.starts_with('@') || trimmed.ends_with('@') {
+        return Err("Invalid email address");
+    }
+    Ok(trimmed)
+}
+
+fn validate_password(password: &str) -> Result<(), &'static str> {
+    if password.len() < PASSWORD_MIN_LEN {
+        Err("Password must be at least 8 characters")
+    } else {
+        Ok(())
+    }
+}
+
+fn fetch_user_by_email(conn: &Connection, email: &str) -> rusqlite::Result<Option<UserRecord>> {
+    conn.query_row(
+        "SELECT id, email, password_hash, salt, role, COALESCE(must_change_password, 0) FROM users WHERE email = ?1",
+        params![email],
+        |row| {
+            Ok(UserRecord {
+                id: row.get(0)?,
+                email: row.get(1)?,
+                password_hash: row.get(2)?,
+                salt: row.get(3)?,
+                role: row.get(4)?,
+                must_change_password: row.get::<_, i64>(5)? != 0,
+            })
+        },
+    )
+    .optional()
+}
+
+fn fetch_user_by_id(conn: &Connection, user_id: &str) -> rusqlite::Result<Option<UserRecord>> {
+    conn.query_row(
+        "SELECT id, email, password_hash, salt, role, COALESCE(must_change_password, 0) FROM users WHERE id = ?1",
+        params![user_id],
+        |row| {
+            Ok(UserRecord {
+                id: row.get(0)?,
+                email: row.get(1)?,
+                password_hash: row.get(2)?,
+                salt: row.get(3)?,
+                role: row.get(4)?,
+                must_change_password: row.get::<_, i64>(5)? != 0,
+            })
+        },
+    )
+    .optional()
+}
+
+fn issue_jwt(state: &AppState, user: &UserRecord) -> Result<String, String> {
+    let exp = Utc::now()
+        .checked_add_signed(Duration::hours(24))
+        .ok_or_else(|| "Failed to compute expiration".to_string())?
+        .timestamp() as usize;
+    let claims = Claims {
+        sub: user.id.clone(),
+        email: user.email.clone(),
+        role: user.role.clone(),
+        exp,
+    };
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(state.jwt_secret.as_bytes()),
+    )
+    .map_err(|e| e.to_string())
+}
+
+fn store_password_reset_token(
+    conn: &Connection,
+    user_id: &str,
+    token: &str,
+    expires_at: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM password_reset_tokens WHERE user_id = ?1 OR expires_at <= strftime('%s','now')",
+        params![user_id],
+    )?;
+    conn.execute(
+        "INSERT INTO password_reset_tokens(token, user_id, expires_at, created_at, consumed) VALUES (?1, ?2, ?3, strftime('%s','now'), 0)",
+        params![token, user_id, expires_at],
+    )?;
+    Ok(())
+}
+
+fn mark_token_consumed(conn: &Connection, token: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM password_reset_tokens WHERE token = ?1",
+        params![token],
+    )?;
+    Ok(())
+}
+
+fn build_reset_link(base: &str, token: &str) -> String {
+    let separator = if base.contains('?') { "&" } else { "?" };
+    format!(
+        "{}{}token={}",
+        base.trim_end_matches('/'),
+        separator,
+        urlencoding::encode(token)
+    )
+}
+
+async fn send_password_reset_email(
+    state: &AppState,
+    to: &str,
+    reset_link: &str,
+) -> Result<(), String> {
+    let Some(token) = state.w9_mail_api_token.as_ref() else {
+        tracing::warn!("W9_MAIL_API_TOKEN not configured; password reset email not sent");
+        return Err("Email service not configured".into());
+    };
+
+    let subject = "Reset your W9 Tools password";
+    let body = format!(
+        "<p>You requested to reset your password for W9 Tools.</p>\
+        <p><a href=\"{link}\">Click here to reset your password</a>.\
+        This link expires in {hours} hour(s).</p>\
+        <p>If you did not request this, you can ignore this email.</p>",
+        link = reset_link,
+        hours = PASSWORD_RESET_TOKEN_TTL_HOURS
+    );
+
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{}/api/send", state.w9_mail_api_url.trim_end_matches('/')))
+        .bearer_auth(token)
+        .json(&serde_json::json!({
+            "from": state.email_from_address,
+            "to": to,
+            "subject": subject,
+            "body": body,
+            "is_html": true
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Email service responded with {}", resp.status()));
+    }
+    Ok(())
 }
 
 fn normalize_custom_code(raw: &str) -> Result<String, &'static str> {
@@ -549,7 +716,7 @@ pub async fn short_handler(State(state): State<AppState>, Path(code): Path<Strin
     }
 }
 
-fn hash_with_salt(password: &str, salt: &str) -> String {
+pub(crate) fn hash_with_salt(password: &str, salt: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(salt.as_bytes());
     hasher.update(password.as_bytes());
@@ -557,7 +724,7 @@ fn hash_with_salt(password: &str, salt: &str) -> String {
     hex::encode(result)
 }
 
-fn generate_token(len: usize) -> String {
+pub(crate) fn generate_token(len: usize) -> String {
     rand::thread_rng()
         .sample_iter(&Alphanumeric)
         .take(len)
@@ -1306,45 +1473,75 @@ pub struct LoginRequest {
 }
 
 pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginRequest>) -> impl IntoResponse {
-    let client = reqwest::Client::new();
-    let url = format!("{}/api/auth/login", state.w9_mail_api_url);
-    tracing::debug!("Forwarding login request to: {}", url);
-    match client
-        .post(&url)
-        .json(&payload)
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            tracing::debug!("Login response status: {}, body: {}", status_code, body);
-            
-            // If body is empty (w9-mail returns StatusCode without body on 401), provide a helpful error
-            if body.is_empty() {
-                let error_msg = match status_code {
-                    401 => "Invalid email or password",
-                    500 => "Internal server error",
-                    _ => "Authentication failed",
-                };
-                (status, Json(serde_json::json!({"error": error_msg})))
-            } else {
-                // Try to parse JSON, fallback to error message
-                match serde_json::from_str::<serde_json::Value>(&body) {
-                    Ok(json) => (status, Json(json)),
-                    Err(_) => {
-                        // If not JSON, return the body as error message
-                        (status, Json(serde_json::json!({"error": body})))
-                    }
-                }
-            }
+    let email = match normalize_email(&payload.email) {
+        Ok(email) => email,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": msg})),
+            )
+        }
+    };
+
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to open database: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
+        }
+    };
+
+    let user = match fetch_user_by_email(&conn, &email) {
+        Ok(Some(user)) => user,
+        Ok(None) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": "Invalid email or password"})),
+            )
         }
         Err(e) => {
-            tracing::error!("Failed to forward login request to {}: {}", url, e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Failed to connect to authentication service"})))
+            tracing::error!("Failed to query user: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
         }
+    };
+
+    let hashed = hash_with_salt(&payload.password, &user.salt);
+    if hashed != user.password_hash {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Invalid email or password"})),
+        );
     }
+
+    let token = match issue_jwt(&state, &user) {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::error!("Failed to issue JWT: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to create session"})),
+            );
+        }
+    };
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "token": token,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "role": user.role,
+                "must_change_password": user.must_change_password
+            }
+        })),
+    )
 }
 
 // Register endpoint - forwards to w9-mail
@@ -1355,24 +1552,98 @@ pub struct RegisterRequest {
 }
 
 pub async fn register(State(state): State<AppState>, Json(payload): Json<RegisterRequest>) -> impl IntoResponse {
-    let client = reqwest::Client::new();
-    match client
-        .post(&format!("{}/api/auth/signup", state.w9_mail_api_url))
-        .json(&payload)
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (status, Json(serde_json::json!(serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::json!({"error": "Invalid response"})))))
+    let email = match normalize_email(&payload.email) {
+        Ok(email) => email,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": msg})),
+            )
+        }
+    };
+
+    if let Err(msg) = validate_password(&payload.password) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        );
+    }
+
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to open database: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
+        }
+    };
+
+    if let Ok(Some(_)) = fetch_user_by_email(&conn, &email) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Email already registered"})),
+        );
+    }
+
+    let user_id = Uuid::new_v4().to_string();
+    let salt = generate_token(32);
+    let password_hash = hash_with_salt(&payload.password, &salt);
+
+    let created_at = Utc::now().timestamp();
+    match conn.execute(
+        "INSERT INTO users(id, email, password_hash, salt, role, must_change_password, created_at) VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+        params![user_id, email, password_hash, salt, "user", created_at],
+    ) {
+        Ok(_) => {}
+        Err(SqliteError::SqliteFailure(err, _)) if err.code == ErrorCode::ConstraintViolation => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({"error": "Email already registered"})),
+            )
         }
         Err(e) => {
-            tracing::error!("Failed to forward register request: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Failed to connect to authentication service"})))
+            tracing::error!("Failed to insert user: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to create user"})),
+            );
         }
     }
+
+    let user = UserRecord {
+        id: user_id,
+        email,
+        password_hash,
+        salt,
+        role: "user".to_string(),
+        must_change_password: false,
+    };
+
+    let token = match issue_jwt(&state, &user) {
+        Ok(token) => token,
+        Err(e) => {
+            tracing::error!("Failed to issue JWT: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to create session"})),
+            );
+        }
+    };
+
+    (
+        StatusCode::CREATED,
+        Json(serde_json::json!({
+            "message": "Registration successful",
+            "token": token,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "role": user.role
+            }
+        })),
+    )
 }
 
 // Get user's items (profile)
@@ -1512,9 +1783,25 @@ pub struct AdminSendPasswordResetRequest {
     pub email: String,
 }
 
+#[derive(Serialize)]
+struct AdminUserSummary {
+    id: String,
+    email: String,
+    role: String,
+    must_change_password: bool,
+    created_at: i64,
+}
+
 #[derive(Serialize, Deserialize)]
 pub struct ChangePasswordRequest {
     pub old_password: String,
+    pub new_password: String,
+    pub confirm_password: String,
+}
+
+#[derive(Deserialize)]
+pub struct PasswordResetConfirmRequest {
+    pub token: String,
     pub new_password: String,
     pub confirm_password: String,
 }
@@ -1591,188 +1878,529 @@ pub async fn user_update_item(
 }
 
 // Request password reset - forwards to w9-mail (public endpoint)
-pub async fn request_password_reset(State(state): State<AppState>, Json(payload): Json<AdminSendPasswordResetRequest>) -> impl IntoResponse {
-    let client = reqwest::Client::new();
-    match client
-        .post(&format!("{}/api/auth/password-reset", state.w9_mail_api_url))
-        .json(&serde_json::json!({"email": payload.email}))
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (status, Json(serde_json::json!(serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::json!({"error": "Invalid response"})))))
+pub async fn request_password_reset(
+    State(state): State<AppState>,
+    Json(payload): Json<AdminSendPasswordResetRequest>,
+) -> impl IntoResponse {
+    let email = match normalize_email(&payload.email) {
+        Ok(email) => email,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": msg})),
+            )
+        }
+    };
+
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to open database: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
+        }
+    };
+
+    if let Ok(Some(user)) = fetch_user_by_email(&conn, &email) {
+        let token = generate_token(48);
+        let expires_at = Utc::now()
+            .checked_add_signed(Duration::hours(PASSWORD_RESET_TOKEN_TTL_HOURS))
+            .map(|ts| ts.timestamp())
+            .unwrap_or_else(|| Utc::now().timestamp());
+
+        if let Err(e) = store_password_reset_token(&conn, &user.id, &token, expires_at) {
+            tracing::error!("Failed to store password reset token: {}", e);
+        } else {
+            let reset_link = build_reset_link(&state.password_reset_base_url, &token);
+            if let Err(e) = send_password_reset_email(&state, &user.email, &reset_link).await {
+                tracing::error!("Failed to send password reset email: {}", e);
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({"message": "If the account exists, a reset link has been sent."})),
+    )
+}
+
+pub async fn confirm_password_reset(
+    State(state): State<AppState>,
+    Json(payload): Json<PasswordResetConfirmRequest>,
+) -> impl IntoResponse {
+    if payload.new_password != payload.confirm_password {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Passwords do not match"})),
+        );
+    }
+    if let Err(msg) = validate_password(&payload.new_password) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        );
+    }
+
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to open database: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
+        }
+    };
+
+    let token_row = conn
+        .query_row(
+            "SELECT user_id, expires_at FROM password_reset_tokens WHERE token = ?1",
+            params![payload.token],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional();
+
+    let (user_id, expires_at) = match token_row {
+        Ok(Some(data)) => data,
+        Ok(None) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid or expired token"})),
+            )
         }
         Err(e) => {
-            tracing::error!("Failed to forward password reset request: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Failed to connect to authentication service"})))
+            tracing::error!("Failed to query reset token: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
+        }
+    };
+
+    if expires_at < Utc::now().timestamp() {
+        let _ = mark_token_consumed(&conn, &payload.token);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Token expired"})),
+        );
+    }
+
+    let Some(mut user) = fetch_user_by_id(&conn, &user_id).unwrap_or(None) else {
+        let _ = mark_token_consumed(&conn, &payload.token);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "User no longer exists"})),
+        );
+    };
+
+    let new_salt = generate_token(32);
+    let new_hash = hash_with_salt(&payload.new_password, &new_salt);
+
+    match conn.execute(
+        "UPDATE users SET password_hash = ?1, salt = ?2, must_change_password = 0 WHERE id = ?3",
+        params![new_hash, new_salt, user.id],
+    ) {
+        Ok(_) => {
+            let _ = mark_token_consumed(&conn, &payload.token);
+            user.salt = new_salt;
+            user.password_hash = new_hash;
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({"message": "Password reset successful"})),
+            )
+        }
+        Err(e) => {
+            tracing::error!("Failed to update password: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to update password"})),
+            )
         }
     }
 }
 
 // Change password - forwards to w9-mail
-pub async fn change_password(State(state): State<AppState>, _user: AuthUser, headers: HeaderMap, Json(payload): Json<ChangePasswordRequest>) -> impl IntoResponse {
+pub async fn change_password(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Json(payload): Json<ChangePasswordRequest>,
+) -> impl IntoResponse {
     if payload.new_password != payload.confirm_password {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "New passwords do not match"}))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "New passwords do not match"})),
+        )
+        .into_response();
     }
-    if payload.new_password.len() < 8 {
-        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Password must be at least 8 characters"}))).into_response();
+    if let Err(msg) = validate_password(&payload.new_password) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        )
+        .into_response();
     }
-    
-    let token = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|auth| auth.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
-    
-    let client = reqwest::Client::new();
-    let mut req = client
-        .post(&format!("{}/api/auth/change-password", state.w9_mail_api_url))
-        .json(&serde_json::json!({
-            "current_password": payload.old_password,
-            "new_password": payload.new_password
-        }));
-    
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {}", t));
-    }
-    
-    match req.send().await {
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (status, Json(serde_json::json!(serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::json!({"error": "Invalid response"}))))).into_response()
-        }
+
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
         Err(e) => {
-            tracing::error!("Failed to forward change password request: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Failed to connect to authentication service"}))).into_response()
+            tracing::error!("Failed to open database: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            )
+                .into_response();
+        }
+    };
+
+    let Some(user_record) = fetch_user_by_id(&conn, &user.id).unwrap_or(None) else {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "User not found"})),
+        )
+            .into_response();
+    };
+
+    let current_hash = hash_with_salt(&payload.old_password, &user_record.salt);
+    if current_hash != user_record.password_hash {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Current password is incorrect"})),
+        )
+            .into_response();
+    }
+
+    let new_salt = generate_token(32);
+    let new_hash = hash_with_salt(&payload.new_password, &new_salt);
+
+    match conn.execute(
+        "UPDATE users SET password_hash = ?1, salt = ?2, must_change_password = 0 WHERE id = ?3",
+        params![new_hash, new_salt, user.id],
+    ) {
+        Ok(_) => (
+            StatusCode::OK,
+            Json(serde_json::json!({"message": "Password changed successfully"})),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to update password: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to update password"})),
+            )
+                .into_response()
         }
     }
 }
 
-// Helper to extract token from headers
-fn extract_token_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|auth| auth.strip_prefix("Bearer "))
-        .map(|s| s.to_string())
+pub async fn admin_list_users(State(state): State<AppState>, AdminUser(_): AdminUser) -> impl IntoResponse {
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to open database: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
+        }
+    };
+
+    let mut stmt = match conn.prepare(
+        "SELECT id, email, role, COALESCE(must_change_password, 0), COALESCE(created_at, strftime('%s','now')) \
+         FROM users ORDER BY created_at DESC",
+    ) {
+        Ok(stmt) => stmt,
+        Err(e) => {
+            tracing::error!("Failed to prepare user query: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
+        }
+    };
+
+    let users_iter = match stmt.query_map([], |row| {
+        Ok(AdminUserSummary {
+            id: row.get(0)?,
+            email: row.get(1)?,
+            role: row.get(2)?,
+            must_change_password: row.get::<_, i64>(3)? != 0,
+            created_at: row.get::<_, i64>(4)?,
+        })
+    }) {
+        Ok(iter) => iter,
+        Err(e) => {
+            tracing::error!("Failed to iterate users: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
+        }
+    };
+
+    let mut users = Vec::new();
+    for user in users_iter {
+        match user {
+            Ok(u) => users.push(u),
+            Err(e) => {
+                tracing::error!("Failed to read user row: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": "Database error"})),
+                );
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(users))
 }
 
-// Admin: List users - forwards to w9-mail
-pub async fn admin_list_users(State(state): State<AppState>, _user: AuthUser, headers: HeaderMap) -> impl IntoResponse {
-    let token = extract_token_from_headers(&headers);
-    let client = reqwest::Client::new();
-    let mut req = client.get(&format!("{}/api/users", state.w9_mail_api_url));
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {}", t));
-    }
-    match req.send().await {
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (status, Json(serde_json::json!(serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::json!({"error": "Invalid response"})))))
+pub async fn admin_create_user(
+    State(state): State<AppState>,
+    AdminUser(_): AdminUser,
+    Json(payload): Json<AdminCreateUserRequest>,
+) -> impl IntoResponse {
+    let email = match normalize_email(&payload.email) {
+        Ok(email) => email,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": msg})),
+            );
         }
+    };
+
+    if let Err(msg) = validate_password(&payload.password) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": msg})),
+        );
+    }
+
+    let role = payload
+        .role
+        .as_deref()
+        .map(|r| r.to_ascii_lowercase())
+        .unwrap_or_else(|| "user".to_string());
+
+    if !matches!(role.as_str(), "user" | "admin" | "dev") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Invalid role"})),
+        );
+    }
+
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
         Err(e) => {
-            tracing::error!("Failed to forward list users request: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Failed to connect to authentication service"})))
+            tracing::error!("Failed to open database: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
+        }
+    };
+
+    if let Ok(Some(_)) = fetch_user_by_email(&conn, &email) {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({"error": "Email already exists"})),
+        );
+    }
+
+    let salt = generate_token(32);
+    let password_hash = hash_with_salt(&payload.password, &salt);
+    let user_id = Uuid::new_v4().to_string();
+    let created_at = Utc::now().timestamp();
+
+    match conn.execute(
+        "INSERT INTO users(id, email, password_hash, salt, role, must_change_password, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6)",
+        params![user_id, email, password_hash, salt, role, created_at],
+    ) {
+        Ok(_) => (
+            StatusCode::CREATED,
+            Json(serde_json::json!(AdminUserSummary {
+                id: user_id,
+                email,
+                role,
+                must_change_password: false,
+                created_at,
+            })),
+        ),
+        Err(e) => {
+            tracing::error!("Failed to create user: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to create user"})),
+            )
         }
     }
 }
 
-// Admin: Create user - forwards to w9-mail
-pub async fn admin_create_user(State(state): State<AppState>, _user: AuthUser, headers: HeaderMap, Json(payload): Json<AdminCreateUserRequest>) -> impl IntoResponse {
-    let token = extract_token_from_headers(&headers);
-    let client = reqwest::Client::new();
-    let mut req = client
-        .post(&format!("{}/api/users", state.w9_mail_api_url))
-        .json(&payload);
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {}", t));
+pub async fn admin_update_user(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(user_id): Path<String>,
+    Json(payload): Json<AdminUpdateUserRequest>,
+) -> impl IntoResponse {
+    if payload.role.is_none() && payload.must_change_password.is_none() && payload.password.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "No changes provided"})),
+        );
     }
-    match req.send().await {
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (status, Json(serde_json::json!(serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::json!({"error": "Invalid response"})))))
-        }
+
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
         Err(e) => {
-            tracing::error!("Failed to forward create user request: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Failed to connect to authentication service"})))
+            tracing::error!("Failed to open database: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
+        }
+    };
+
+    let Some(mut user) = fetch_user_by_id(&conn, &user_id).unwrap_or(None) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "User not found"})),
+        );
+    };
+
+    if admin.id == user.id && payload.role.as_deref().is_some() && payload.role.as_deref() != Some(&user.role) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Cannot change your own role"})),
+        );
+    }
+
+    if let Some(role) = payload.role.as_ref() {
+        if !matches!(role.as_str(), "user" | "admin" | "dev") {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "Invalid role"})),
+            );
+        }
+        if let Err(e) = conn.execute(
+            "UPDATE users SET role = ?1 WHERE id = ?2",
+            params![role, &user.id],
+        ) {
+            tracing::error!("Failed to update role: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to update user"})),
+            );
+        }
+        user.role = role.clone();
+    }
+
+    if let Some(flag) = payload.must_change_password {
+        if let Err(e) = conn.execute(
+            "UPDATE users SET must_change_password = ?1 WHERE id = ?2",
+            params![flag as i64, &user.id],
+        ) {
+            tracing::error!("Failed to update must_change_password: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to update user"})),
+            );
+        }
+        user.must_change_password = flag;
+    }
+
+    if let Some(password) = payload.password.as_ref() {
+        if let Err(msg) = validate_password(password) {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": msg})),
+            );
+        }
+        let new_salt = generate_token(32);
+        let new_hash = hash_with_salt(password, &new_salt);
+        if let Err(e) = conn.execute(
+            "UPDATE users SET password_hash = ?1, salt = ?2, must_change_password = 0 WHERE id = ?3",
+            params![new_hash, new_salt, &user.id],
+        ) {
+            tracing::error!("Failed to update password: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to update user"})),
+            );
+        }
+        user.password_hash = new_hash;
+        user.salt = new_salt;
+        user.must_change_password = false;
+    }
+
+    let created_at = conn
+        .query_row(
+            "SELECT COALESCE(created_at, strftime('%s','now')) FROM users WHERE id = ?1",
+            params![&user.id],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| Utc::now().timestamp());
+
+    (
+        StatusCode::OK,
+        Json(serde_json::json!(AdminUserSummary {
+            id: user.id,
+            email: user.email,
+            role: user.role,
+            must_change_password: user.must_change_password,
+            created_at,
+        })),
+    )
+}
+
+pub async fn admin_delete_user(
+    State(state): State<AppState>,
+    AdminUser(admin): AdminUser,
+    Path(user_id): Path<String>,
+) -> impl IntoResponse {
+    if admin.id == user_id {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Cannot delete yourself"})),
+        );
+    }
+
+    let conn = match Connection::open(&state.db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to open database: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Database error"})),
+            );
+        }
+    };
+
+    match conn.execute("DELETE FROM users WHERE id = ?1", params![user_id]) {
+        Ok(affected) if affected > 0 => (
+            StatusCode::OK,
+            Json(serde_json::json!({"success": true})),
+        ),
+        Ok(_) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "User not found"})),
+        ),
+        Err(e) => {
+            tracing::error!("Failed to delete user: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to delete user"})),
+            )
         }
     }
 }
 
-// Admin: Update user - forwards to w9-mail
-pub async fn admin_update_user(State(state): State<AppState>, _user: AuthUser, headers: HeaderMap, Path(user_id): Path<String>, Json(payload): Json<AdminUpdateUserRequest>) -> impl IntoResponse {
-    let token = extract_token_from_headers(&headers);
-    let client = reqwest::Client::new();
-    let mut req = client
-        .patch(&format!("{}/api/users/{}", state.w9_mail_api_url, user_id))
-        .json(&payload);
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {}", t));
-    }
-    match req.send().await {
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (status, Json(serde_json::json!(serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::json!({"error": "Invalid response"})))))
-        }
-        Err(e) => {
-            tracing::error!("Failed to forward update user request: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Failed to connect to authentication service"})))
-        }
-    }
-}
-
-// Admin: Delete user - forwards to w9-mail
-pub async fn admin_delete_user(State(state): State<AppState>, _user: AuthUser, headers: HeaderMap, Path(user_id): Path<String>) -> impl IntoResponse {
-    let token = extract_token_from_headers(&headers);
-    let client = reqwest::Client::new();
-    let mut req = client.delete(&format!("{}/api/users/{}", state.w9_mail_api_url, user_id));
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {}", t));
-    }
-    match req.send().await {
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (status, Json(serde_json::json!({"success": true})))
-        }
-        Err(e) => {
-            tracing::error!("Failed to forward delete user request: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Failed to connect to authentication service"})))
-        }
-    }
-}
-
-// Admin: Send password reset link - forwards to w9-mail
-pub async fn admin_send_password_reset(State(state): State<AppState>, _user: AuthUser, headers: HeaderMap, Json(payload): Json<AdminSendPasswordResetRequest>) -> impl IntoResponse {
-    let token = extract_token_from_headers(&headers);
-    let client = reqwest::Client::new();
-    let mut req = client
-        .post(&format!("{}/api/auth/password-reset", state.w9_mail_api_url))
-        .json(&serde_json::json!({"email": payload.email}));
-    if let Some(t) = token {
-        req = req.header("Authorization", format!("Bearer {}", t));
-    }
-    match req.send().await {
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            let body = resp.text().await.unwrap_or_default();
-            let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            (status, Json(serde_json::json!(serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::json!({"error": "Invalid response"})))))
-        }
-        Err(e) => {
-            tracing::error!("Failed to forward send password reset request: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Failed to connect to authentication service"})))
-        }
-    }
+pub async fn admin_send_password_reset(
+    State(state): State<AppState>,
+    AdminUser(_): AdminUser,
+    Json(payload): Json<AdminSendPasswordResetRequest>,
+) -> impl IntoResponse {
+    request_password_reset(State(state), Json(payload)).await
 }

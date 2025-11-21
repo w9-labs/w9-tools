@@ -11,6 +11,8 @@ use axum::routing::get_service;
 use axum::http::StatusCode;
 use serde_json::json;
 use rusqlite::{Connection, params};
+use uuid::Uuid;
+use chrono::Utc;
 
 mod handlers;
 
@@ -192,6 +194,9 @@ async fn main() -> anyhow::Result<()> {
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| format!("https://w9.se"));
 
+    ensure_user_schema(&conn)?;
+    ensure_default_admin(&conn)?;
+
     // Get uploads directory from environment or use default relative path
     let uploads_dir = std::env::var("UPLOADS_DIR")
         .unwrap_or_else(|_| "uploads".to_string());
@@ -209,6 +214,14 @@ async fn main() -> anyhow::Result<()> {
     // Get JWT secret for verifying tokens from w9-mail (should match w9-mail's JWT_SECRET)
     let jwt_secret = std::env::var("JWT_SECRET")
         .unwrap_or_else(|_| "change-me-in-production".to_string());
+
+    let email_from_address = std::env::var("EMAIL_FROM_ADDRESS")
+        .unwrap_or_else(|_| "W9 Tools <no-reply@w9.se>".to_string());
+    let password_reset_base_url = std::env::var("PASSWORD_RESET_BASE_URL")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| format!("{}/reset-password", base_url.trim_end_matches('/')));
+    let w9_mail_api_token = std::env::var("W9_MAIL_API_TOKEN").ok().filter(|v| !v.trim().is_empty());
     
     let app_state = handlers::AppState { 
         db_path: db_path.clone(), 
@@ -216,6 +229,9 @@ async fn main() -> anyhow::Result<()> {
         uploads_dir: uploads_dir.clone(),
         w9_mail_api_url: w9_mail_api_url.clone(),
         jwt_secret: jwt_secret.clone(),
+        email_from_address,
+        password_reset_base_url,
+        w9_mail_api_token,
     };
 
     // File serving (no state/auth required)
@@ -232,7 +248,7 @@ async fn main() -> anyhow::Result<()> {
         // API endpoints only (no UI)
         .route("/api/upload", post(handlers::api_upload))
         .route("/api/notepad", post(handlers::api_notepad))
-        // Auth endpoints (forward to w9-mail)
+        // Auth endpoints (local database)
         .route("/api/auth/login", post(handlers::login))
         .route("/api/auth/register", post(handlers::register))
         .route("/api/auth/password-reset", post(handlers::request_password_reset))
@@ -241,7 +257,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/user/items", get(handlers::user_items))
         .route("/api/user/items/:code/:kind", post(handlers::user_delete_item))
         .route("/api/user/items/:code/:kind/update", post(handlers::user_update_item))
-        // Admin user management endpoints (forward to w9-mail)
+        // Admin user management endpoints
         .route("/api/admin/users", get(handlers::admin_list_users).post(handlers::admin_create_user))
         .route("/api/admin/users/:id", patch(handlers::admin_update_user).delete(handlers::admin_delete_user))
         .route("/api/admin/users/send-reset", post(handlers::admin_send_password_reset))
@@ -287,6 +303,67 @@ async fn main() -> anyhow::Result<()> {
             tracing::error!("Server error: {}", e);
             anyhow::anyhow!("Server error: {}", e)
         })?;
+
+    Ok(())
+}
+
+fn ensure_user_schema(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            email TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            salt TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            must_change_password INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email);
+
+        CREATE TABLE IF NOT EXISTS password_reset_tokens (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            expires_at INTEGER NOT NULL,
+            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+            consumed INTEGER NOT NULL DEFAULT 0,
+            FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_user ON password_reset_tokens(user_id);
+        CREATE INDEX IF NOT EXISTS idx_password_reset_tokens_expires ON password_reset_tokens(expires_at);
+        "#,
+    )?;
+    Ok(())
+}
+
+fn ensure_default_admin(conn: &Connection) -> anyhow::Result<()> {
+    let admin_email = std::env::var("DEFAULT_ADMIN_EMAIL")
+        .unwrap_or_else(|_| "admin@w9.se".to_string());
+    let admin_password = std::env::var("DEFAULT_ADMIN_PASSWORD")
+        .unwrap_or_else(|_| "Admin@123".to_string());
+
+    let admin_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM users WHERE role = 'admin'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+
+    if admin_count == 0 {
+        let salt = handlers::generate_token(32);
+        let password_hash = handlers::hash_with_salt(&admin_password, &salt);
+        let created_at = Utc::now().timestamp();
+        conn.execute(
+            "INSERT INTO users(id, email, password_hash, salt, role, must_change_password, created_at) \
+             VALUES (?1, ?2, ?3, ?4, 'admin', 1, ?5)",
+            params![Uuid::new_v4().to_string(), admin_email, password_hash, salt, created_at],
+        )?;
+        tracing::info!(
+            "Created default admin user {} (set DEFAULT_ADMIN_EMAIL/PASSWORD to override)",
+            admin_email
+        );
+    }
 
     Ok(())
 }
