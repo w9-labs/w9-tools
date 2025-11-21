@@ -2,7 +2,7 @@
 
 use axum::extract::{Form, Multipart, Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, request::Parts};
-use axum::response::{Html, IntoResponse, Redirect};
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Json;
 use axum::debug_handler;
 use axum::async_trait;
@@ -10,6 +10,7 @@ use axum::extract::FromRequestParts;
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, DecodingKey, Validation, encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use mime_guess::from_path as mime_from_path;
 use nanoid::nanoid;
 use qrcode::render::svg::Color;
@@ -530,6 +531,22 @@ fn build_reset_link(base: &str, token: &str) -> String {
     )
 }
 
+fn password_update_required_response() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(json!({"error": "Password update required"})),
+    )
+        .into_response()
+}
+
+fn ensure_password_current(user: &AuthUser) -> Result<(), Response> {
+    if user.must_change_password {
+        Err(password_update_required_response())
+    } else {
+        Ok(())
+    }
+}
+
 fn build_verify_link(base: &str, token: &str) -> String {
     let separator = if base.contains('?') { "&" } else { "?" };
     format!(
@@ -1037,17 +1054,19 @@ pub struct AuthUser {
     pub id: String,
     pub email: String,
     pub role: String,
+    pub must_change_password: bool,
 }
 
 // Extract AuthUser from JWT token
 #[async_trait]
 impl<S> FromRequestParts<S> for AuthUser
 where
+    State<AppState>: FromRequestParts<S>,
     S: Send + Sync,
 {
     type Rejection = (StatusCode, &'static str);
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let auth_header = parts
             .headers
             .get(axum::http::header::AUTHORIZATION)
@@ -1058,18 +1077,29 @@ where
             .strip_prefix("Bearer ")
             .ok_or((StatusCode::UNAUTHORIZED, "Invalid authorization header"))?;
 
-        // Get JWT secret from environment (should match w9-mail's JWT_SECRET)
-        let jwt_secret = std::env::var("JWT_SECRET")
-            .unwrap_or_else(|_| "change-me-in-production".to_string());
+        let State(app_state) =
+            State::<AppState>::from_request_parts(parts, state).await.map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to extract application state",
+                )
+            })?;
 
-        let decoding_key = DecodingKey::from_secret(jwt_secret.as_bytes());
+        let decoding_key = DecodingKey::from_secret(app_state.jwt_secret.as_bytes());
         let token_data = decode::<Claims>(token, &decoding_key, &Validation::default())
             .map_err(|_| (StatusCode::UNAUTHORIZED, "Invalid or expired token"))?;
 
+        let conn = Connection::open(&app_state.db_path)
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?;
+        let user = fetch_user_by_id(&conn, &token_data.claims.sub)
+            .map_err(|_| (StatusCode::INTERNAL_SERVER_ERROR, "Database error"))?
+            .ok_or((StatusCode::UNAUTHORIZED, "User not found"))?;
+
         Ok(AuthUser {
-            id: token_data.claims.sub,
-            email: token_data.claims.email,
-            role: token_data.claims.role,
+            id: user.id,
+            email: user.email,
+            role: user.role,
+            must_change_password: user.must_change_password,
         })
     }
 }
@@ -1080,6 +1110,7 @@ pub struct OptionalAuthUser(pub Option<AuthUser>);
 #[async_trait]
 impl<S> FromRequestParts<S> for OptionalAuthUser
 where
+    State<AppState>: FromRequestParts<S>,
     S: Send + Sync,
 {
     type Rejection = (StatusCode, &'static str);
@@ -1098,12 +1129,16 @@ pub struct AdminUser(pub AuthUser);
 #[async_trait]
 impl<S> FromRequestParts<S> for AdminUser
 where
+    State<AppState>: FromRequestParts<S>,
     S: Send + Sync,
 {
     type Rejection = (StatusCode, &'static str);
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
         let user = AuthUser::from_request_parts(parts, state).await?;
+        if user.must_change_password {
+            return Err((StatusCode::FORBIDDEN, "Password update required"));
+        }
         if user.role.to_lowercase() != "admin" {
             return Err((StatusCode::FORBIDDEN, "Admin access required"));
         }
@@ -1933,6 +1968,9 @@ pub async fn register(State(state): State<AppState>, Json(payload): Json<Registe
 
 // Get user's items (profile)
 pub async fn user_items(State(state): State<AppState>, user: AuthUser) -> impl IntoResponse {
+    if let Err(resp) = ensure_password_current(&user) {
+        return resp;
+    }
     let conn = match Connection::open(&state.db_path) {
         Ok(c) => c,
         Err(e) => {
@@ -1984,6 +2022,9 @@ pub async fn user_delete_item(
     user: AuthUser,
     Path((code, kind)): Path<(String, String)>,
 ) -> impl IntoResponse {
+    if let Err(resp) = ensure_password_current(&user) {
+        return resp;
+    }
     // Verify ownership
     let conn = match Connection::open(&state.db_path) {
         Ok(c) => c,
@@ -2150,6 +2191,9 @@ pub async fn user_update_item(
     Path((code, kind)): Path<(String, String)>,
     Json(payload): Json<UpdateItemRequest>,
 ) -> impl IntoResponse {
+    if let Err(resp) = ensure_password_current(&user) {
+        return resp;
+    }
     // Verify ownership
     let conn = match Connection::open(&state.db_path) {
         Ok(c) => c,
@@ -2755,7 +2799,7 @@ pub async fn admin_create_user(
 
     match conn.execute(
         "INSERT INTO users(id, email, password_hash, salt, role, must_change_password, created_at, is_verified) \
-         VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, 1)",
+         VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, 1)",
         params![user_id, email, password_hash, salt, role, created_at],
     ) {
         Ok(_) => (
@@ -2764,7 +2808,7 @@ pub async fn admin_create_user(
                 id: user_id,
                 email,
                 role,
-                must_change_password: false,
+                must_change_password: true,
                 created_at,
             })),
         ),

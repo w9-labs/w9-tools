@@ -173,8 +173,9 @@ function AdminPanel() {
         return
       }
       if (resp.status === 403) {
-        // User doesn't have admin role
-        alert('Admin access required. You need to be logged in as an admin user.')
+        await handleForbiddenResponse(resp, () => {
+          alert('Admin access required. You need to be logged in as an admin user.')
+        })
         return
       }
       if (resp.ok) {
@@ -207,9 +208,10 @@ function AdminPanel() {
           return
         }
         if (resp.status === 403) {
-          // User doesn't have admin role
-          setError('Admin access required. You need to be logged in as an admin user.')
-          setLoading(false)
+          await handleForbiddenResponse(resp, () => {
+            setError('Admin access required. You need to be logged in as an admin user.')
+            setLoading(false)
+          })
           return
         }
         
@@ -253,6 +255,12 @@ function AdminPanel() {
         setUsersError('Unauthorized - Admin access required')
         return
       }
+      if (resp.status === 403) {
+        await handleForbiddenResponse(resp, () => {
+          setUsersError('Admin access required')
+        })
+        return
+      }
       if (!resp.ok) {
         throw new Error(`HTTP ${resp.status}`)
       }
@@ -280,6 +288,12 @@ function AdminPanel() {
           role: newUserRole
         })
       })
+      if (resp.status === 403) {
+        await handleForbiddenResponse(resp, () => {
+          alert('Admin access required')
+        })
+        return
+      }
       if (resp.ok) {
         setShowCreateUser(false)
         setNewUserEmail('')
@@ -308,6 +322,12 @@ function AdminPanel() {
           must_change_password: editUserMustChangePass
         })
       })
+      if (resp.status === 403) {
+        await handleForbiddenResponse(resp, () => {
+          alert('Admin access required')
+        })
+        return
+      }
       if (resp.ok) {
         setEditingUser(null)
         fetchUsers()
@@ -329,6 +349,12 @@ function AdminPanel() {
           'Authorization': `Bearer ${token}`
         }
       })
+      if (resp.status === 403) {
+        await handleForbiddenResponse(resp, () => {
+          alert('Admin access required')
+        })
+        return
+      }
       if (resp.ok) {
         fetchUsers()
       } else {
@@ -337,6 +363,20 @@ function AdminPanel() {
       }
     } catch (err: any) {
       alert(err?.message || 'Failed to delete user')
+    }
+  }
+
+  const redirectToPasswordChange = () => {
+    alert('Password update required. Please change your password before using admin tools.')
+    window.location.href = '/profile?force=password'
+  }
+
+  const handleForbiddenResponse = async (resp: Response, onFallback: () => void) => {
+    const text = await resp.text()
+    if (text && text.includes('Password update required')) {
+      redirectToPasswordChange()
+    } else {
+      onFallback()
     }
   }
 
@@ -350,6 +390,12 @@ function AdminPanel() {
         },
         body: JSON.stringify({ email })
       })
+      if (resp.status === 403) {
+        await handleForbiddenResponse(resp, () => {
+          alert('Admin access required')
+        })
+        return
+      }
       if (resp.ok) {
         const data = await resp.json()
         alert(data.message || 'Password reset link sent')
@@ -376,6 +422,12 @@ function AdminPanel() {
         })
       ])
 
+      if (optionsResp.status === 403) {
+        await handleForbiddenResponse(optionsResp, () => {
+          setSenderError('Admin access required')
+        })
+        return
+      }
       if (optionsResp.ok) {
         const data = await optionsResp.json()
         setSenderOptions(Array.isArray(data.options) ? data.options : [])
@@ -384,6 +436,12 @@ function AdminPanel() {
         throw new Error(data.error || 'Failed to load sender options')
       }
 
+      if (currentResp.status === 403) {
+        await handleForbiddenResponse(currentResp, () => {
+          setSenderError('Admin access required')
+        })
+        return
+      }
       if (currentResp.ok) {
         const data = await currentResp.json()
         setCurrentSender(data.sender || null)
@@ -416,6 +474,12 @@ function AdminPanel() {
           via_display: option.via_display
         })
       })
+      if (resp.status === 403) {
+        await handleForbiddenResponse(resp, () => {
+          setSenderError('Admin access required')
+        })
+        return
+      }
       const data = await resp.json()
       if (!resp.ok) {
         throw new Error(data.error || 'Failed to update sender')
@@ -1195,6 +1259,11 @@ function LoginPage() {
       const data = await resp.json()
       if (resp.ok && data.token) {
         localStorage.setItem('w9_token', data.token)
+        if (data.user?.must_change_password) {
+          localStorage.setItem('w9_force_password_reset', '1')
+        } else {
+          localStorage.removeItem('w9_force_password_reset')
+        }
         window.location.href = redirectTo
       } else {
         setError(data.error || 'Login failed')
@@ -1452,6 +1521,7 @@ function ProfilePage() {
   const [passwordError, setPasswordError] = useState<string | null>(null)
   const [passwordSuccess, setPasswordSuccess] = useState<string | null>(null)
   const [passwordLoading, setPasswordLoading] = useState(false)
+  const [passwordRequiredBanner, setPasswordRequiredBanner] = useState(false)
 
   const token = localStorage.getItem('w9_token')
 
@@ -1459,6 +1529,12 @@ function ProfilePage() {
     if (!token) {
       window.location.href = '/login'
       return
+    }
+    const params = new URLSearchParams(window.location.search)
+    const forceParam = params.get('force')
+    if (forceParam === 'password' || localStorage.getItem('w9_force_password_reset') === '1') {
+      setShowChangePassword(true)
+      setPasswordRequiredBanner(true)
     }
     fetchItems()
   }, [token])
@@ -1473,6 +1549,31 @@ function ProfilePage() {
       if (resp.status === 401) {
         localStorage.removeItem('w9_token')
         window.location.href = '/login'
+        return
+      }
+      if (resp.status === 403) {
+        setPasswordError('Password update required before proceeding.')
+        setShowChangePassword(true)
+        setPasswordRequiredBanner(true)
+        return
+      }
+      if (resp.status === 403) {
+        setShowChangePassword(true)
+        setPasswordRequiredBanner(true)
+        alert('Password update required. Change your password to continue.')
+        return
+      }
+      if (resp.status === 403) {
+        setShowChangePassword(true)
+        setPasswordRequiredBanner(true)
+        alert('Password update required. Change your password to continue.')
+        return
+      }
+      if (resp.status === 403) {
+        setShowChangePassword(true)
+        setPasswordRequiredBanner(true)
+        setError('Password update required. Change your password to continue.')
+        setLoading(false)
         return
       }
       if (!resp.ok) {
@@ -1586,6 +1687,8 @@ function ProfilePage() {
         setNewPassword('')
         setConfirmPassword('')
         setShowChangePassword(false)
+        setPasswordRequiredBanner(false)
+        localStorage.removeItem('w9_force_password_reset')
       } else {
         setPasswordError(data.error || 'Failed to change password')
       }
@@ -1607,6 +1710,11 @@ function ProfilePage() {
       <main className="panel">
         <h1>My Profile</h1>
         <p className="subtitle">Manage your short links</p>
+        {passwordRequiredBanner && (
+          <div className="banner" style={{ marginBottom: '1rem', borderColor: '#ff6b6b', color: '#ff6b6b' }}>
+            You must update your password before continuing.
+          </div>
+        )}
         
         <div style={{ marginBottom: '20px' }}>
           <button
