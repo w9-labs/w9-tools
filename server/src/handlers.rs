@@ -1958,7 +1958,12 @@ pub async fn confirm_password_reset(
         .query_row(
             "SELECT user_id, expires_at FROM password_reset_tokens WHERE token = ?1",
             params![payload.token],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                ))
+            },
         )
         .optional();
 
@@ -2153,7 +2158,10 @@ pub async fn admin_list_users(State(state): State<AppState>, AdminUser(_): Admin
         }
     }
 
-    (StatusCode::OK, Json(users))
+    (
+        StatusCode::OK,
+        Json(serde_json::json!(users)),
+    )
 }
 
 pub async fn admin_create_user(
