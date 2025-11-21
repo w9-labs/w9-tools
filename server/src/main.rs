@@ -60,51 +60,15 @@ async fn main() -> anyhow::Result<()> {
             anyhow::anyhow!("Database error: {}", e)
         })?;
     // Check if table exists and needs migration
-    let (needs_migration, has_user_id) = {
-        // First check if table exists
-        let table_exists: bool = conn.query_row(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='items'",
+    let needs_migration = {
+        let table_info: Result<String, _> = conn.query_row(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='items'",
             [],
-            |r| {
-                let count: i64 = r.get(0)?;
-                Ok(count > 0)
-            },
-        ).unwrap_or(false);
-        
-        if !table_exists {
-            (false, false) // Table doesn't exist, will be created with correct schema
-        } else {
-            // Check if composite primary key exists
-            let table_info: Result<String, _> = conn.query_row(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='items'",
-                [],
-                |r| r.get(0),
-            );
-            let needs_mig = match table_info {
-                Ok(sql) => !sql.contains("PRIMARY KEY (code, kind)"),
-                Err(_) => false,
-            };
-            
-            // Check if user_id column exists using PRAGMA table_info
-            let has_uid = conn.prepare("PRAGMA table_info(items)")
-                .and_then(|mut stmt| {
-                    let rows = stmt.query_map([], |row| {
-                        Ok(row.get::<_, String>(1)?) // column name is at index 1
-                    })?;
-                    let mut found = false;
-                    for row in rows {
-                        if let Ok(name) = row {
-                            if name == "user_id" {
-                                found = true;
-                                break;
-                            }
-                        }
-                    }
-                    Ok(found)
-                })
-                .unwrap_or(false);
-            
-            (needs_mig, has_uid)
+            |r| r.get(0),
+        );
+        match table_info {
+            Ok(sql) => !sql.contains("PRIMARY KEY (code, kind)"),
+            Err(_) => false, // Table doesn't exist, will be created with correct schema
         }
     };
 
@@ -128,22 +92,28 @@ async fn main() -> anyhow::Result<()> {
         
         // Copy data from old table to new table
         // Handle potential duplicates by keeping the first occurrence
-        if has_user_id {
-            conn.execute(
-                r#"
-                INSERT OR IGNORE INTO items_new (code, kind, value, created_at, user_id)
-                SELECT code, kind, value, created_at, user_id FROM items
-                "#,
-                [],
-            )?;
-        } else {
-            conn.execute(
-                r#"
-                INSERT OR IGNORE INTO items_new (code, kind, value, created_at, user_id)
-                SELECT code, kind, value, created_at, NULL FROM items
-                "#,
-                [],
-            )?;
+        // Try to copy with user_id first, if that fails (column doesn't exist), copy without it
+        match conn.execute(
+            r#"
+            INSERT OR IGNORE INTO items_new (code, kind, value, created_at, user_id)
+            SELECT code, kind, value, created_at, user_id FROM items
+            "#,
+            [],
+        ) {
+            Ok(_) => {
+                tracing::info!("Copied data with user_id column");
+            }
+            Err(_) => {
+                // user_id column doesn't exist in old table, copy without it
+                tracing::info!("Copying data without user_id (column doesn't exist in old table)");
+                conn.execute(
+                    r#"
+                    INSERT OR IGNORE INTO items_new (code, kind, value, created_at, user_id)
+                    SELECT code, kind, value, created_at, NULL FROM items
+                    "#,
+                    [],
+                )?;
+            }
         }
         
         // Drop old table and rename new one
@@ -168,79 +138,51 @@ async fn main() -> anyhow::Result<()> {
                 PRIMARY KEY (code, kind)
             );
             CREATE INDEX IF NOT EXISTS idx_items_code ON items(code);
-            CREATE INDEX IF NOT EXISTS idx_items_user_id ON items(user_id);
             "#,
         )?;
         
-        // Migrate existing items table to add user_id column if it doesn't exist
-        if !has_user_id {
-            tracing::info!("Adding user_id column to items table...");
-            match conn.execute("ALTER TABLE items ADD COLUMN user_id TEXT", []) {
+        // Always try to add user_id column if table exists (ALTER TABLE is safe - won't fail if column exists)
+        tracing::info!("Ensuring user_id column exists...");
+        if let Err(e) = conn.execute("ALTER TABLE items ADD COLUMN user_id TEXT", []) {
+            // If this fails, it might be because column already exists or other issue
+            // Try to verify by attempting a query
+            match conn.query_row::<_, (), _>("SELECT user_id FROM items LIMIT 1", [], |_| Ok(())) {
                 Ok(_) => {
-                    conn.execute("CREATE INDEX IF NOT EXISTS idx_items_user_id ON items(user_id)", [])?;
-                    tracing::info!("Migration completed: user_id column added");
+                    tracing::info!("user_id column exists (verified by query)");
                 }
-                Err(e) => {
-                    // Column might already exist or other error - check again
-                    let check_again = conn.prepare("PRAGMA table_info(items)")
-                        .and_then(|mut stmt| {
-                            let rows = stmt.query_map([], |row| {
-                                Ok(row.get::<_, String>(1)?)
-                            })?;
-                            let mut found = false;
-                            for row in rows {
-                                if let Ok(name) = row {
-                                    if name == "user_id" {
-                                        found = true;
-                                        break;
-                                    }
-                                }
-                            }
-                            Ok(found)
-                        })
-                        .unwrap_or(false);
-                    
-                    if check_again {
-                        tracing::info!("user_id column already exists");
-                        conn.execute("CREATE INDEX IF NOT EXISTS idx_items_user_id ON items(user_id)", [])?;
-                    } else {
-                        tracing::warn!("Failed to add user_id column: {}, but continuing...", e);
-                        // Try to create index anyway in case column exists but wasn't detected
-                        let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_user_id ON items(user_id)", []);
-                    }
+                Err(_) => {
+                    tracing::error!("user_id column does not exist and could not be added: {}", e);
+                    return Err(anyhow::anyhow!("Failed to add user_id column: {}", e));
                 }
             }
+        } else {
+            tracing::info!("user_id column added successfully");
+        }
+        
+        // Create index on user_id (will fail silently if column doesn't exist, but we verified above)
+        if let Err(e) = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_user_id ON items(user_id)", []) {
+            tracing::warn!("Failed to create index on user_id: {} (column should exist, continuing anyway)", e);
         }
     }
     
-    // Final safety check: ensure user_id column exists regardless of migration path
+    // Final safety check: verify user_id column exists by attempting a query
     {
-        let user_id_exists = conn.prepare("PRAGMA table_info(items)")
-            .and_then(|mut stmt| {
-                let rows = stmt.query_map([], |row| {
-                    Ok(row.get::<_, String>(1)?)
-                })?;
-                let mut found = false;
-                for row in rows {
-                    if let Ok(name) = row {
-                        if name == "user_id" {
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-                Ok(found)
-            })
-            .unwrap_or(false);
-        
-        if !user_id_exists {
-            tracing::warn!("user_id column missing after migration, attempting to add...");
-            if let Err(e) = conn.execute("ALTER TABLE items ADD COLUMN user_id TEXT", []) {
-                tracing::error!("Failed to add user_id column: {}", e);
-                return Err(anyhow::anyhow!("Failed to add user_id column: {}", e));
+        match conn.query_row::<_, (), _>("SELECT user_id FROM items LIMIT 1", [], |_| Ok(())) {
+            Ok(_) => {
+                tracing::info!("user_id column verified to exist");
+                // Ensure index exists
+                let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_user_id ON items(user_id)", []);
             }
-            let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_user_id ON items(user_id)", []);
-            tracing::info!("user_id column added successfully");
+            Err(e) => {
+                tracing::error!("user_id column does not exist or cannot be queried: {}", e);
+                // Try one more time to add it
+                if let Err(e2) = conn.execute("ALTER TABLE items ADD COLUMN user_id TEXT", []) {
+                    tracing::error!("Failed to add user_id column in final check: {}", e2);
+                    return Err(anyhow::anyhow!("user_id column is missing and could not be added: {}", e2));
+                }
+                tracing::info!("user_id column added in final safety check");
+                let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_items_user_id ON items(user_id)", []);
+            }
         }
     }
     
