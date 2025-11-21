@@ -103,14 +103,18 @@ function AdminPanel() {
   const [editUserRole, setEditUserRole] = useState('user')
   const [editUserMustChangePass, setEditUserMustChangePass] = useState(false)
   
-  const token = localStorage.getItem('w9_token')
+  const [token, setToken] = useState<string | null>(localStorage.getItem('w9_token'))
 
   useEffect(() => {
-    if (!token) {
+    // Check token on mount and update state
+    const currentToken = localStorage.getItem('w9_token')
+    setToken(currentToken)
+    
+    if (!currentToken) {
       window.location.href = '/login?redirect=/admin'
       return
     }
-  }, [token])
+  }, [])
 
   const handleLogout = () => {
     localStorage.removeItem('w9_token')
@@ -128,9 +132,15 @@ function AdminPanel() {
           'Authorization': `Bearer ${token}`
         }
       })
-      if (resp.status === 401 || resp.status === 403) {
+      if (resp.status === 401) {
+        // Token invalid or expired
         localStorage.removeItem('w9_token')
         window.location.href = '/login?redirect=/admin'
+        return
+      }
+      if (resp.status === 403) {
+        // User doesn't have admin role
+        alert('Admin access required. You need to be logged in as an admin user.')
         return
       }
       if (resp.ok) {
@@ -156,9 +166,16 @@ function AdminPanel() {
           }
         })
         
-        if (resp.status === 401 || resp.status === 403) {
+        if (resp.status === 401) {
+          // Token invalid or expired
           localStorage.removeItem('w9_token')
           window.location.href = '/login?redirect=/admin'
+          return
+        }
+        if (resp.status === 403) {
+          // User doesn't have admin role
+          setError('Admin access required. You need to be logged in as an admin user.')
+          setLoading(false)
           return
         }
         

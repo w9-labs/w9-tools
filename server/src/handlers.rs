@@ -1320,7 +1320,25 @@ pub async fn login(State(state): State<AppState>, Json(payload): Json<LoginReque
             let body = resp.text().await.unwrap_or_default();
             let status = StatusCode::from_u16(status_code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
             tracing::debug!("Login response status: {}, body: {}", status_code, body);
-            (status, Json(serde_json::json!(serde_json::from_str::<serde_json::Value>(&body).unwrap_or(serde_json::json!({"error": "Invalid response"})))))
+            
+            // If body is empty (w9-mail returns StatusCode without body on 401), provide a helpful error
+            if body.is_empty() {
+                let error_msg = match status_code {
+                    401 => "Invalid email or password",
+                    500 => "Internal server error",
+                    _ => "Authentication failed",
+                };
+                (status, Json(serde_json::json!({"error": error_msg})))
+            } else {
+                // Try to parse JSON, fallback to error message
+                match serde_json::from_str::<serde_json::Value>(&body) {
+                    Ok(json) => (status, Json(json)),
+                    Err(_) => {
+                        // If not JSON, return the body as error message
+                        (status, Json(serde_json::json!({"error": body})))
+                    }
+                }
+            }
         }
         Err(e) => {
             tracing::error!("Failed to forward login request to {}: {}", url, e);
