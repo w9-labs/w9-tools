@@ -133,10 +133,10 @@ function Footer() {
           </ul>
         </div>
         <div>
-          <div className="footer-title">W9 Systems AB</div>
+          <div className="footer-title">W9 Labs</div>
           <p className="footer-copy">
-            Monochrome utilities for busy operators. Reach us at{' '}
-            <a href="mailto:hello@w9.se">hello@w9.se</a>
+            Open Source. Community Driven. Non-Profit. Reach us at{' '}
+            <a href="mailto:hi@w9.se">hi@w9.se</a>
           </p>
         </div>
       </div>
@@ -878,22 +878,71 @@ function Homepage() {
     <div className="app">
       <Header />
       <main className="page">
-        <section className="box">
-          <h1>W9 Tools · Share Fast</h1>
-          <p className="subtitle">
-            Single-binary console for short links, secure uploads, and markdown notes. Always-on, SQLite-backed, ready for terminals and touch screens alike.
+        <section className="box" style={{ textAlign: 'center' }}>
+          <h1>W9 Labs</h1>
+          <p className="subtitle" style={{ marginBottom: '1rem' }}>
+            <strong>Open Source. Community Driven. Non-Profit.</strong>
           </p>
-          <ul className="list">
-            <li>Drop files or URLs — get short codes + QR instantly</li>
-            <li>Markdown notepad with permalinks at `/n/:code`</li>
-            <li>Admin rail for items, users, and sender routing</li>
-          </ul>
-          <div className="actions">
-            <a href="/short" className="button">Launch Shortener</a>
-            <a href="https://github.com/ShayNeeo/w9-tools" target="_blank" rel="noreferrer" className="button ghost">
-              View on GitHub
-            </a>
+          <div className="actions" style={{ justifyContent: 'center', marginBottom: '1.5rem' }}>
+            <a href="https://w9.se" className="button ghost" target="_blank" rel="noreferrer">HQ · w9.se</a>
+            <a href="https://w9.nu" className="button ghost" target="_blank" rel="noreferrer">Hub · w9.nu</a>
           </div>
+          <p style={{ marginBottom: '1.5rem' }}>
+            <b>W9 Labs</b> is a non-profit collective dedicated to building accessible, transparent, and robust open-source software. We believe technology should be a commons, built by the community, for the community.
+          </p>
+        </section>
+
+        <section className="box">
+          <h2 className="section-title">Who We Are</h2>
+          <p>
+            We are a team of developers, designers, and enthusiasts working together to create tools that empower users. As a non-profit initiative, our primary stakeholders are our users and contributors, not shareholders.
+          </p>
+          <div style={{ marginTop: '1rem' }}>
+            <p><strong>Our Domains</strong></p>
+            <ul className="list">
+              <li><a href="https://w9.se" target="_blank" rel="noreferrer">w9.se</a>: Our organizational home, governance, and long-term documentation.</li>
+              <li><a href="https://w9.nu" target="_blank" rel="noreferrer">w9.nu</a>: Our release hub, community showcase, and "what's happening now."</li>
+            </ul>
+          </div>
+        </section>
+
+        <section className="box">
+          <h2 className="section-title">Our Mission</h2>
+          <ul className="list">
+            <li><strong>Openness:</strong> Every line of code we produce is open source and auditable.</li>
+            <li><strong>Community First:</strong> We prioritize user privacy, data sovereignty, and community feedback.</li>
+            <li><strong>Sustainability:</strong> We build software designed to last, focusing on stability and performance.</li>
+          </ul>
+        </section>
+
+        <section className="box">
+          <h2 className="section-title">What We Build</h2>
+          <p>We focus on developing solutions in the following areas:</p>
+          <ul className="list">
+            <li><strong>Core Infrastructure:</strong> Tools to help self-hosters and sysadmins.</li>
+            <li><strong>Privacy Tools:</strong> Utilities that protect user identity on the modern web.</li>
+            <li><strong>Community Utilities:</strong> Libraries and scripts to improve developer workflows.</li>
+          </ul>
+          <div className="actions" style={{ marginTop: '1rem' }}>
+            <a href="/short" className="button">W9 Tools</a>
+            <a href="https://w9.nu" className="button ghost" target="_blank" rel="noreferrer">W9 Mail</a>
+            <a href="https://github.com/orgs/w9-labs/repositories" className="button ghost" target="_blank" rel="noreferrer">View Repositories</a>
+          </div>
+        </section>
+
+        <section className="box">
+          <h2 className="section-title">Contributing</h2>
+          <p>
+            We welcome contributors of all skill levels! Whether you are fixing a typo, refactoring code, or designing a logo, your help is appreciated.
+          </p>
+          <p style={{ marginTop: '0.5rem' }}>
+            <strong>How to join the fun:</strong>
+          </p>
+          <ol style={{ listStyle: 'decimal', paddingLeft: '1.5rem', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
+            <li>Explore our repositories and look for the <code>good first issue</code> label.</li>
+            <li>Fork the repo and create a branch.</li>
+            <li>Submit a Pull Request (PR).</li>
+          </ol>
         </section>
       </main>
       <Footer />

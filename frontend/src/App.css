@@ -368,6 +368,14 @@ table td {
   content: "· ";
 }
 
+code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  padding: 0.15rem 0.35rem;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 0.9em;
+}
+
 .sender-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
