@@ -22,6 +22,14 @@ declare global {
 function TurnstileWidget({ onVerify, onError }: { onVerify: (token: string) => void; onError?: () => void }) {
   const widgetRef = useRef<HTMLDivElement>(null)
   const widgetIdRef = useRef<string | null>(null)
+  const onVerifyRef = useRef(onVerify)
+  const onErrorRef = useRef(onError)
+
+  // Update refs when callbacks change
+  useEffect(() => {
+    onVerifyRef.current = onVerify
+    onErrorRef.current = onError
+  }, [onVerify, onError])
 
   useEffect(() => {
     if (!TURNSTILE_SITE_KEY || !widgetRef.current) return
@@ -31,10 +39,10 @@ function TurnstileWidget({ onVerify, onError }: { onVerify: (token: string) => v
         widgetIdRef.current = window.turnstile.render(widgetRef.current, {
           sitekey: TURNSTILE_SITE_KEY,
           callback: (token: string) => {
-            onVerify(token)
+            onVerifyRef.current(token)
           },
           'error-callback': () => {
-            if (onError) onError()
+            if (onErrorRef.current) onErrorRef.current()
           },
           'expired-callback': () => {
             if (widgetIdRef.current) {
@@ -55,7 +63,7 @@ function TurnstileWidget({ onVerify, onError }: { onVerify: (token: string) => v
         widgetIdRef.current = null
       }
     }
-  }, [onVerify, onError])
+  }, []) // Empty dependency array - only run once
 
   if (!TURNSTILE_SITE_KEY) {
     return null
