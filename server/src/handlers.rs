@@ -264,8 +264,8 @@ pub struct AppState {
 }
 
 const PASSWORD_MIN_LEN: usize = 8;
-const PASSWORD_RESET_TOKEN_TTL_HOURS: i64 = 24;
-const EMAIL_VERIFICATION_TOKEN_TTL_HOURS: i64 = 48;
+const PASSWORD_RESET_TOKEN_TTL_MINUTES: i64 = 30;
+const EMAIL_VERIFICATION_TOKEN_TTL_MINUTES: i64 = 30;
 const EMAIL_SENDER_SETTING_KEY: &str = "email_sender";
 
 async fn verify_turnstile(secret: &str, token: &str) -> Result<bool, String> {
@@ -730,10 +730,7 @@ async fn send_password_reset_email(
     let subject = "Reset your W9 Tools password";
     let body_lines = vec![
         format!("We received a password reset request for {}.", to),
-        format!(
-            "This link expires in {} hour(s). If you didn’t request it, you can ignore this message.",
-            PASSWORD_RESET_TOKEN_TTL_HOURS
-        ),
+        "This link expires in 30 minutes. If you didn't request it, you can ignore this message.".to_string(),
     ];
     let html = render_transactional_email(subject, &body_lines, "Reset password", reset_link);
     send_transactional_email(state, to, subject, &html).await
@@ -749,10 +746,7 @@ async fn send_verification_email(
         format!("Thanks for creating a W9 Tools account with {}.", to),
         "Click the button below to verify your email and unlock uploads, short links, and secure notes."
             .to_string(),
-        format!(
-            "The link expires in {} hour(s). If this wasn’t you, feel free to ignore this email.",
-            EMAIL_VERIFICATION_TOKEN_TTL_HOURS
-        ),
+        "The link expires in 30 minutes. If this wasn't you, feel free to ignore this email.".to_string(),
     ];
     let html = render_transactional_email(subject, &body_lines, "Verify account", verify_link);
     send_transactional_email(state, to, subject, &html).await
@@ -2104,7 +2098,7 @@ pub async fn register(State(state): State<AppState>, Json(payload): Json<Registe
 
     let verify_token = generate_token(64);
     let verify_expires = Utc::now()
-        .checked_add_signed(Duration::hours(EMAIL_VERIFICATION_TOKEN_TTL_HOURS))
+        .checked_add_signed(Duration::minutes(EMAIL_VERIFICATION_TOKEN_TTL_MINUTES))
         .unwrap_or_else(|| Utc::now())
         .timestamp();
 
@@ -2478,7 +2472,7 @@ pub async fn request_password_reset(
     if let Ok(Some(user)) = fetch_user_by_email(&conn, &email) {
         let token = generate_token(48);
         let expires_at = Utc::now()
-            .checked_add_signed(Duration::hours(PASSWORD_RESET_TOKEN_TTL_HOURS))
+            .checked_add_signed(Duration::minutes(PASSWORD_RESET_TOKEN_TTL_MINUTES))
             .map(|ts| ts.timestamp())
             .unwrap_or_else(|| Utc::now().timestamp());
 
