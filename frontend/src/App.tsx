@@ -1263,7 +1263,7 @@ function ShortsPage() {
             {result && (
               <div className="status">
                 <div className="row" style={{ gap: '0.5rem', alignItems: 'center' }}>
-                  <span className="label-inline">Short URL</span>
+                  <span className="label-inline">Short URL: </span>
                   <a href={toAbsoluteUrl(result.short_url)} className="link" target="_blank" rel="noreferrer">
                     {toAbsoluteUrl(result.short_url)}
                   </a>
