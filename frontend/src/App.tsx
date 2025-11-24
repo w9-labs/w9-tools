@@ -967,7 +967,7 @@ function Homepage() {
 
         <section className="box">
           <h2 className="section-title">Who We Are</h2>
-          <p>
+          <p className="justify">
             We are a team of developers, designers, and enthusiasts working together to create tools that empower users. As a non-profit initiative, our primary stakeholders are our users and contributors, not shareholders.
           </p>
           <div style={{ marginTop: '1rem' }}>

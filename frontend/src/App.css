@@ -425,6 +425,10 @@ table td {
   letter-spacing: 0.08em;
 }
 
+.justify {
+  text-align: justify;
+}
+
 code {
   background: var(--bg);
   border: 1px solid var(--border);
