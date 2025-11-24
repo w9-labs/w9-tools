@@ -420,8 +420,7 @@ table td {
   color: var(--muted);
 }
 
-.sponsor-intro {
-  text-align: center;
+.sponsor-inter {
   letter-spacing: 0.08em;
 }
 
