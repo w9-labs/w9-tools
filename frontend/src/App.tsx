@@ -1116,7 +1116,7 @@ function Homepage() {
                   <img src="/fossvps.png" alt="FOSSVPS logo" />
                 </a>
               </div>
-              <p className="sponsor-credit">FOSSVPS provide infrastructure for open-source developers.</p>
+              <p className="sponsor-credit">FOSSVPS provides infrastructure for open-source developers.</p>
             </div>
           </div>
           <p className="sponsor-footnote">Credits curated by W9 Labs · reach out via hi@w9.se to be listed here.</p>
