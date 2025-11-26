@@ -54,4 +54,16 @@
     <priority>0.7</priority>
     <lastmod>2025-01-20</lastmod>
   </url>
+  <url>
+    <loc>https://w9.se/privacy</loc>
+    <changefreq>yearly</changefreq>
+    <priority>0.5</priority>
+    <lastmod>2025-01-20</lastmod>
+  </url>
+  <url>
+    <loc>https://w9.se/terms</loc>
+    <changefreq>yearly</changefreq>
+    <priority>0.5</priority>
+    <lastmod>2025-01-20</lastmod>
+  </url>
 </urlset>

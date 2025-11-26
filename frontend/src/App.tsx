@@ -116,6 +116,41 @@ type EmailSenderConfig = {
 } | null
 
 // Simple router
+const NETWORK_LINKS = [
+  { id: 'tools', label: 'W9 Tools', description: 'w9.se · Links & drops', href: '/', external: false },
+  { id: 'mail', label: 'W9 Mail', description: 'w9.nu · Transactional rail', href: 'https://w9.nu', external: true },
+  { id: 'reminders', label: 'W9 Daily Reminders', description: 'reminder.w9.nu · Calendar digest', href: 'https://reminder.w9.nu', external: true },
+] as const
+
+type NetworkId = (typeof NETWORK_LINKS)[number]['id']
+
+function NetworkBar({ active }: { active: NetworkId }) {
+  return (
+    <div className="network-bar">
+      <div>
+        <span className="network-label">W9 Labs Network</span>
+        <span className="network-tagline">Open-source automation for independent teams</span>
+      </div>
+      <nav className="network-links">
+        {NETWORK_LINKS.map((link) => {
+          const className = `network-link ${active === link.id ? 'active' : ''}`
+          return link.external ? (
+            <a key={link.id} href={link.href} target="_blank" rel="noreferrer" className={className}>
+              <span>{link.label}</span>
+              <small>{link.description}</small>
+            </a>
+          ) : (
+            <a key={link.id} href={link.href} className={className}>
+              <span>{link.label}</span>
+              <small>{link.description}</small>
+            </a>
+          )
+        })}
+      </nav>
+    </div>
+  )
+}
+
 function useRoute() {
   const path = window.location.pathname
   if (path.startsWith('/admin')) return 'admin'
@@ -127,6 +162,8 @@ function useRoute() {
   if (path === '/short' || path.startsWith('/short/')) return 'shorts'
   if (path === '/note' || path.startsWith('/note')) return 'note'
   if (path === '/convert' || path.startsWith('/convert')) return 'convert'
+  if (path === '/privacy') return 'privacy'
+  if (path === '/terms') return 'terms'
   return 'home'
 }
 
@@ -151,17 +188,17 @@ function Header() {
   
   return (
     <header className="header">
-      {!isHomepage && (
-        <div className="brand">
-          <div>
-            <h1>W9 TOOLS</h1>
-            <span>Fast drops • Short links • Secure notes</span>
-          </div>
-          <div className="pill" style={{ borderColor: token ? '#00ffd0' : undefined, color: token ? '#00ffd0' : undefined }}>
-            {token ? 'SIGNED IN' : 'GUEST'}
-          </div>
+      <NetworkBar active="tools" />
+      <div className="brand">
+        <div>
+          <p className="eyebrow">Developed by W9 Labs</p>
+          <h1>W9 Tools</h1>
+          <span>Fast drops • Short links • Secure notes</span>
         </div>
-      )}
+        <div className="pill" style={{ borderColor: token ? '#00ffd0' : undefined, color: token ? '#00ffd0' : undefined }}>
+          {token ? 'SIGNED IN' : 'GUEST'}
+        </div>
+      </div>
       <nav className="nav">
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', alignItems: 'center' }}>
           <a href="/" className={path === '/' ? 'nav-link active' : 'nav-link'}>Home</a>
@@ -170,6 +207,8 @@ function Header() {
           <a href="/convert" className={path.startsWith('/convert') ? 'nav-link active' : 'nav-link'}>Converter</a>
           <a href="/profile" className={path === '/profile' ? 'nav-link active' : 'nav-link'}>Profile</a>
           <a href="/admin" className={path.startsWith('/admin') ? 'nav-link active' : 'nav-link'}>Admin</a>
+          <a href="/terms" className={path === '/terms' ? 'nav-link active' : 'nav-link'}>Terms</a>
+          <a href="/privacy" className={path === '/privacy' ? 'nav-link active' : 'nav-link'}>Privacy</a>
         </div>
         <div style={{ display: 'flex', gap: '0.5rem', flexWrap: 'wrap' }}>
           {token ? (
@@ -191,28 +230,41 @@ function Footer() {
     <footer className="site-footer">
       <div className="footer-columns">
         <div>
-          <div className="footer-title">Other Projects</div>
+          <div className="footer-title">Developed by W9 Labs</div>
+          <p className="footer-copy">
+            W9 Tools powers the public landing page for the W9 Labs network. Short links, note drops, and admin surfaces are open-source
+            and community audited. Contact <a href="mailto:hi@w9.se">hi@w9.se</a>.
+          </p>
+        </div>
+        <div>
+          <div className="footer-title">Network</div>
           <ul className="footer-links">
             <li>
-              <a href="https://w9.nu" target="_blank" rel="noreferrer">
-                W9 Mail · Delivery rail
+              <a href="https://w9.se" target="_blank" rel="noreferrer">
+                W9 Tools · Links & drops
               </a>
             </li>
             <li>
-              <a href="https://w9.se" target="_blank" rel="noreferrer">
-                W9 Tools · Drop console
+              <a href="https://w9.nu" target="_blank" rel="noreferrer">
+                W9 Mail · Transactional rail
+              </a>
+            </li>
+            <li>
+              <a href="https://reminder.w9.nu" target="_blank" rel="noreferrer">
+                W9 Daily Reminders · Calendar digest
               </a>
             </li>
           </ul>
         </div>
         <div>
-          <div className="footer-title">W9 Labs</div>
-          <p className="footer-copy">
-            Open Source. Community Driven. Non-Profit. Reach us at{' '}
-            <a href="mailto:hi@w9.se">hi@w9.se</a>
-          </p>
+          <div className="footer-title">Legal</div>
+          <ul className="footer-links">
+            <li><a href="/terms">Terms of Service</a></li>
+            <li><a href="/privacy">Privacy Notice</a></li>
+          </ul>
         </div>
       </div>
+      <div className="footer-bottom">© {new Date().getFullYear()} W9 Labs · Open infrastructure for independent teams.</div>
     </footer>
   )
 }
@@ -1509,6 +1561,102 @@ function ConverterPage() {
   )
 }
 
+function TermsPage() {
+  return (
+    <div className="app">
+      <Header />
+      <main className="page">
+        <section className="box">
+          <h1>Terms of Service</h1>
+          <p className="subtitle">W9 Tools is part of the W9 Labs umbrella. Using it means you agree to the network rules below.</p>
+        </section>
+        <section className="box">
+          <h2 className="section-title">Allowed Use</h2>
+          <ul className="list">
+            <li>Host your own short links, file drops, note pads, and converters for legitimate personal or team workflows.</li>
+            <li>Respect local laws, copyright, and platform policies. No spam, malware, phishing, or harassment.</li>
+            <li>Rotate API keys and passwords regularly. Report security issues privately to hi@w9.se.</li>
+          </ul>
+        </section>
+        <section className="box">
+          <h2 className="section-title">Service Scope</h2>
+          <p>
+            This codebase is provided “as is,” without uptime guarantees. Integrations with W9 Mail or W9 Daily Reminders inherit their
+            own limits. When you enable cross-project sharing, you allow those systems to call your W9 Tools deployment.
+          </p>
+        </section>
+        <section className="box">
+          <h2 className="section-title">Liability</h2>
+          <p>
+            W9 Labs is not responsible for lost revenue, corrupted files, or regulatory fines arising from improper use. Review content
+            before distributing links, and avoid storing regulated data unless you run your own compliance wrappers.
+          </p>
+        </section>
+        <section className="box">
+          <h2 className="section-title">Termination & Changes</h2>
+          <p>
+            Self-hosted installs can be shut down at any time. Managed instances may be suspended if abuse, spam, or policy violations are
+            detected. Terms evolve as EU/EEA regulations change—watch w9.se for changelog entries.
+          </p>
+        </section>
+      </main>
+      <Footer />
+    </div>
+  )
+}
+
+function PrivacyPage() {
+  return (
+    <div className="app">
+      <Header />
+      <main className="page">
+        <section className="box">
+          <h1>Privacy Notice</h1>
+          <p className="subtitle">W9 Tools keeps data minimal and local. Here’s what we store when you use the service.</p>
+        </section>
+        <section className="box">
+          <h2 className="section-title">Data We Collect</h2>
+          <ul className="list">
+            <li>Account email + password hashes for authentication.</li>
+            <li>Uploaded files, URLs, and note contents so we can serve your drops and links.</li>
+            <li>Optional Turnstile tokens for bot protection.</li>
+            <li>Log metadata (IP, user agent, timestamps) for abuse mitigation.</li>
+          </ul>
+        </section>
+        <section className="box">
+          <h2 className="section-title">How It’s Used</h2>
+          <p>
+            Data is only used to render your drops, generate QR codes, and sync with other W9 Labs properties when you explicitly enable
+            those integrations. We do not sell analytics or embed trackers.
+          </p>
+        </section>
+        <section className="box">
+          <h2 className="section-title">Storage & Deletion</h2>
+          <p>
+            Everything lives on the server you control. Delete a drop, notepad, or account to remove it permanently. Backups are encrypted
+            and rotate within 30 days.
+          </p>
+        </section>
+        <section className="box">
+          <h2 className="section-title">Third Parties</h2>
+          <p>
+            Only Cloudflare Turnstile (if enabled) and the email provider you select (via W9 Mail) see limited metadata required to run
+            the service. No ad networks or analytics beacons.
+          </p>
+        </section>
+        <section className="box">
+          <h2 className="section-title">Questions</h2>
+          <p>
+            Email <a href="mailto:hi@w9.se">hi@w9.se</a> for export/delete requests. W9 Labs is a non-profit collective based in the
+            EU/EEA.
+          </p>
+        </section>
+      </main>
+      <Footer />
+    </div>
+  )
+}
+
 function LoginPage() {
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -2357,6 +2505,12 @@ export default function App() {
   }
   if (route === 'convert') {
     return <ConverterPage />
+  }
+  if (route === 'terms') {
+    return <TermsPage />
+  }
+  if (route === 'privacy') {
+    return <PrivacyPage />
   }
   return <Homepage />
 }
