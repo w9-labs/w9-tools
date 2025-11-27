@@ -1125,11 +1125,11 @@ fn embed_logo_in_qr(qr_svg: &str, logo_path: &str) -> Result<String, Box<dyn std
         320.0 // default if no viewBox found
     };
     
-    // Logo should be small enough to avoid covering finder patterns (~18% of size)
-    let logo_size = qr_size * 0.18;
+    // Logo should be small enough to avoid covering finder patterns (~14% of size)
+    let logo_size = qr_size * 0.14;
     let logo_x = (qr_size - logo_size) / 2.0;
     let logo_y = (qr_size - logo_size) / 2.0;
-    let logo_bg_padding = logo_size * 0.15;
+    let logo_bg_padding = logo_size * 0.2;
     let bg_x = logo_x - logo_bg_padding;
     let bg_y = logo_y - logo_bg_padding;
     let bg_size = logo_size + (logo_bg_padding * 2.0);
