@@ -66,6 +66,26 @@ id -u $SERVICE_USER >/dev/null 2>&1 || sudo useradd --system --create-home --hom
 BACKEND_NEEDS_BUILD=true
 FRONTEND_NEEDS_BUILD=true
 
+# Auto-update Rust toolchain and Rust dependencies (if possible)
+echo "Checking Rust toolchain and dependencies..."
+if command -v rustup >/dev/null 2>&1; then
+    echo "Updating Rust toolchain with rustup..."
+    if [ "$BUILD_USER" != "root" ]; then
+        sudo -u $BUILD_USER bash -lc "rustup update stable && rustup default stable" || echo "⚠ rustup update failed (continuing with existing toolchain)"
+    else
+        bash -lc "rustup update stable && rustup default stable" || echo "⚠ rustup update failed (continuing with existing toolchain)"
+    fi
+else
+    echo "⚠ rustup not found, skipping Rust toolchain auto-update"
+fi
+
+echo "Updating Rust crate dependencies with cargo update..."
+if [ "$BUILD_USER" != "root" ]; then
+    sudo -u $BUILD_USER bash -lc "cd '$ROOT_DIR' && cargo update" || echo "⚠ cargo update failed (continuing with existing Cargo.lock)"
+else
+    bash -lc "cd '$ROOT_DIR' && cargo update" || echo "⚠ cargo update failed (continuing with existing Cargo.lock)"
+fi
+
 if [ -f "$ROOT_DIR/target/release/w9" ]; then
     BINARY_TIME=$(stat -c %Y "$ROOT_DIR/target/release/w9" 2>/dev/null || echo 0)
     NEWEST_SRC=$(find "$ROOT_DIR/server" "$ROOT_DIR/Cargo.toml" -type f -name "*.rs" -o -name "Cargo.toml" 2>/dev/null | xargs stat -c %Y 2>/dev/null | sort -n | tail -1)
@@ -94,17 +114,16 @@ fi
 if [ "$FRONTEND_NEEDS_BUILD" = "true" ]; then
     echo "Building frontend..."
     cd "$ROOT_DIR/frontend"
-    # Use npm ci if package-lock.json exists and is in sync, otherwise use npm install
-    if [ -f "package-lock.json" ]; then
-        if npm ci --prefer-offline --no-audit 2>&1 | tail -1; then
-            echo "✓ Dependencies installed with npm ci"
-        else
-            echo "⚠ package-lock.json out of sync, updating..."
-            npm install --prefer-offline --no-audit 2>&1 | tail -1
-        fi
-    else
-        npm install --prefer-offline --no-audit 2>&1 | tail -1
-    fi
+    # Always install/update to latest compatible dependencies
+    echo "Installing npm dependencies..."
+    npm install --prefer-offline --no-audit 2>&1 | tail -1
+
+    echo "Updating npm packages to latest compatible versions..."
+    npm update --no-audit 2>&1 | tail -1 || echo "⚠ npm update failed (continuing with installed versions)"
+
+    echo "Running npm audit fix (best effort)..."
+    npm audit fix --force --legacy-peer-deps 2>&1 | tail -1 || echo "⚠ npm audit fix failed (continuing)"
+
     # Build with Turnstile site key if provided
     if [ -n "${VITE_TURNSTILE_SITE_KEY:-}" ]; then
         VITE_TURNSTILE_SITE_KEY="$VITE_TURNSTILE_SITE_KEY" npm run build 2>&1 | tail -1
