@@ -1,8 +1,8 @@
 import { useState, useRef, FormEvent, useEffect } from 'react'
 import { marked } from 'marked'
 
-const API_BASE: string = import.meta.env?.VITE_API_BASE_URL || ''
-const TURNSTILE_SITE_KEY: string = import.meta.env?.VITE_TURNSTILE_SITE_KEY || ''
+const API_BASE: string = process.env.NEXT_PUBLIC_API_BASE_URL || ''
+const TURNSTILE_SITE_KEY: string = process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || ''
 
 declare global {
   interface Window {

@@ -71,9 +71,11 @@ echo "Checking Rust toolchain and dependencies..."
 if command -v rustup >/dev/null 2>&1; then
     echo "Updating Rust toolchain with rustup..."
     if [ "$BUILD_USER" != "root" ]; then
-        sudo -u $BUILD_USER bash -lc "rustup update stable && rustup default stable" || echo "⚠ rustup update failed (continuing with existing toolchain)"
+        sudo -u "$BUILD_USER" bash -lc 'if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi; rustup update stable && rustup default stable' \
+          || echo "⚠ rustup update failed (continuing with existing toolchain)"
     else
-        bash -lc "rustup update stable && rustup default stable" || echo "⚠ rustup update failed (continuing with existing toolchain)"
+        bash -lc 'if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi; rustup update stable && rustup default stable' \
+          || echo "⚠ rustup update failed (continuing with existing toolchain)"
     fi
 else
     echo "⚠ rustup not found, skipping Rust toolchain auto-update"
@@ -81,9 +83,11 @@ fi
 
 echo "Updating Rust crate dependencies with cargo update..."
 if [ "$BUILD_USER" != "root" ]; then
-    sudo -u $BUILD_USER bash -lc "cd '$ROOT_DIR' && cargo update" || echo "⚠ cargo update failed (continuing with existing Cargo.lock)"
+    sudo -u "$BUILD_USER" bash -lc 'if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi; cd "'"$ROOT_DIR"'" && cargo update' \
+      || echo "⚠ cargo update failed (continuing with existing Cargo.lock)"
 else
-    bash -lc "cd '$ROOT_DIR' && cargo update" || echo "⚠ cargo update failed (continuing with existing Cargo.lock)"
+    bash -lc 'if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi; cd "'"$ROOT_DIR"'" && cargo update' \
+      || echo "⚠ cargo update failed (continuing with existing Cargo.lock)"
 fi
 
 if [ -f "$ROOT_DIR/target/release/w9" ]; then
@@ -92,9 +96,9 @@ if [ -f "$ROOT_DIR/target/release/w9" ]; then
     [ "$NEWEST_SRC" -lt "$BINARY_TIME" ] && BACKEND_NEEDS_BUILD=false
 fi
 
-if [ -d "$ROOT_DIR/frontend/dist" ]; then
-    DIST_TIME=$(stat -c %Y "$ROOT_DIR/frontend/dist" 2>/dev/null || echo 0)
-    NEWEST_FE=$(find "$ROOT_DIR/frontend/src" "$ROOT_DIR/frontend/public" "$ROOT_DIR/frontend/index.html" "$ROOT_DIR/frontend/package.json" "$ROOT_DIR/frontend/vite.config.ts" -type f 2>/dev/null | xargs stat -c %Y 2>/dev/null | sort -n | tail -1)
+if [ -d "$ROOT_DIR/frontend/out" ]; then
+    DIST_TIME=$(stat -c %Y "$ROOT_DIR/frontend/out" 2>/dev/null || echo 0)
+    NEWEST_FE=$(find "$ROOT_DIR/frontend/app" "$ROOT_DIR/frontend/public" "$ROOT_DIR/frontend/package.json" "$ROOT_DIR/frontend/next.config.mjs" -type f 2>/dev/null | xargs stat -c %Y 2>/dev/null | sort -n | tail -1)
     [ "$NEWEST_FE" -lt "$DIST_TIME" ] && FRONTEND_NEEDS_BUILD=false
 fi
 
@@ -114,7 +118,13 @@ fi
 if [ "$FRONTEND_NEEDS_BUILD" = "true" ]; then
     echo "Building frontend..."
     cd "$ROOT_DIR/frontend"
-    # Always install/update to latest compatible dependencies
+    # Optionally update package.json versions with npm-check-updates (best-effort)
+    if [ "${AUTO_UPDATE_PACKAGE_JSON:-1}" != "0" ]; then
+        echo "Updating package.json dependency ranges with npm-check-updates (best-effort)..."
+        npx npm-check-updates@latest -u 2>&1 | tail -1 || echo "⚠ npm-check-updates failed (continuing with existing ranges)"
+    fi
+
+    # Always install/update to latest compatible dependencies within current ranges
     echo "Installing npm dependencies..."
     npm install --prefer-offline --no-audit 2>&1 | tail -1
 
@@ -124,9 +134,11 @@ if [ "$FRONTEND_NEEDS_BUILD" = "true" ]; then
     echo "Running npm audit fix (best effort)..."
     npm audit fix --force --legacy-peer-deps 2>&1 | tail -1 || echo "⚠ npm audit fix failed (continuing)"
 
-    # Build with Turnstile site key if provided
-    if [ -n "${VITE_TURNSTILE_SITE_KEY:-}" ]; then
-        VITE_TURNSTILE_SITE_KEY="$VITE_TURNSTILE_SITE_KEY" npm run build 2>&1 | tail -1
+    # Build with Turnstile site key if provided (support legacy VITE_ and new NEXT_PUBLIC_ names)
+    if [ -n "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ]; then
+        NEXT_PUBLIC_TURNSTILE_SITE_KEY="$NEXT_PUBLIC_TURNSTILE_SITE_KEY" npm run build 2>&1 | tail -1
+    elif [ -n "${VITE_TURNSTILE_SITE_KEY:-}" ]; then
+        NEXT_PUBLIC_TURNSTILE_SITE_KEY="$VITE_TURNSTILE_SITE_KEY" npm run build 2>&1 | tail -1
     else
         npm run build 2>&1 | tail -1
     fi
@@ -173,7 +185,11 @@ sudo chmod 644 $DATA_DIR/* 2>/dev/null || true
 echo "Installing frontend..."
 sudo mkdir -p $FRONTEND_PUBLIC
 sudo rm -rf $FRONTEND_PUBLIC/* 2>/dev/null || true
-sudo cp -r "$ROOT_DIR/frontend/dist"/* $FRONTEND_PUBLIC/
+if [ -d "$ROOT_DIR/frontend/out" ]; then
+    sudo cp -r "$ROOT_DIR/frontend/out"/* $FRONTEND_PUBLIC/
+else
+    echo "WARNING: frontend/out not found; did Next.js export succeed?"
+fi
 sudo chown -R root:root $FRONTEND_PUBLIC
 
 # Env file
