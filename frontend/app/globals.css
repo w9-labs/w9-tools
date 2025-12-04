@@ -1,8 +1,0 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
-/* Existing styling from the Vite app */
-@import '../src/App.css';
-
-

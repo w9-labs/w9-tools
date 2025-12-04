@@ -66,39 +66,15 @@ id -u $SERVICE_USER >/dev/null 2>&1 || sudo useradd --system --create-home --hom
 BACKEND_NEEDS_BUILD=true
 FRONTEND_NEEDS_BUILD=true
 
-# Auto-update Rust toolchain and Rust dependencies (if possible)
-echo "Checking Rust toolchain and dependencies..."
-if command -v rustup >/dev/null 2>&1; then
-    echo "Updating Rust toolchain with rustup..."
-    if [ "$BUILD_USER" != "root" ]; then
-        sudo -u "$BUILD_USER" bash -lc 'if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi; rustup update stable && rustup default stable' \
-          || echo "⚠ rustup update failed (continuing with existing toolchain)"
-    else
-        bash -lc 'if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi; rustup update stable && rustup default stable' \
-          || echo "⚠ rustup update failed (continuing with existing toolchain)"
-    fi
-else
-    echo "⚠ rustup not found, skipping Rust toolchain auto-update"
-fi
-
-echo "Updating Rust crate dependencies with cargo update..."
-if [ "$BUILD_USER" != "root" ]; then
-    sudo -u "$BUILD_USER" bash -lc 'if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi; cd "'"$ROOT_DIR"'" && cargo update' \
-      || echo "⚠ cargo update failed (continuing with existing Cargo.lock)"
-else
-    bash -lc 'if [ -f "$HOME/.cargo/env" ]; then . "$HOME/.cargo/env"; fi; cd "'"$ROOT_DIR"'" && cargo update' \
-      || echo "⚠ cargo update failed (continuing with existing Cargo.lock)"
-fi
-
 if [ -f "$ROOT_DIR/target/release/w9" ]; then
     BINARY_TIME=$(stat -c %Y "$ROOT_DIR/target/release/w9" 2>/dev/null || echo 0)
     NEWEST_SRC=$(find "$ROOT_DIR/server" "$ROOT_DIR/Cargo.toml" -type f -name "*.rs" -o -name "Cargo.toml" 2>/dev/null | xargs stat -c %Y 2>/dev/null | sort -n | tail -1)
     [ "$NEWEST_SRC" -lt "$BINARY_TIME" ] && BACKEND_NEEDS_BUILD=false
 fi
 
-if [ -d "$ROOT_DIR/frontend/out" ]; then
-    DIST_TIME=$(stat -c %Y "$ROOT_DIR/frontend/out" 2>/dev/null || echo 0)
-    NEWEST_FE=$(find "$ROOT_DIR/frontend/app" "$ROOT_DIR/frontend/public" "$ROOT_DIR/frontend/package.json" "$ROOT_DIR/frontend/next.config.mjs" -type f 2>/dev/null | xargs stat -c %Y 2>/dev/null | sort -n | tail -1)
+if [ -d "$ROOT_DIR/frontend/dist" ]; then
+    DIST_TIME=$(stat -c %Y "$ROOT_DIR/frontend/dist" 2>/dev/null || echo 0)
+    NEWEST_FE=$(find "$ROOT_DIR/frontend/src" "$ROOT_DIR/frontend/public" "$ROOT_DIR/frontend/index.html" "$ROOT_DIR/frontend/package.json" "$ROOT_DIR/frontend/vite.config.ts" -type f 2>/dev/null | xargs stat -c %Y 2>/dev/null | sort -n | tail -1)
     [ "$NEWEST_FE" -lt "$DIST_TIME" ] && FRONTEND_NEEDS_BUILD=false
 fi
 
@@ -118,68 +94,20 @@ fi
 if [ "$FRONTEND_NEEDS_BUILD" = "true" ]; then
     echo "Building frontend..."
     cd "$ROOT_DIR/frontend"
-    # Optionally update package.json versions with npm-check-updates
-    if [ "${AUTO_UPDATE_PACKAGE_JSON:-1}" != "0" ]; then
-        if [ "${AUTO_UPDATE_CORE_DEPS:-0}" != "0" ]; then
-            echo "Updating package.json with npm-check-updates (including React/Next), then capping to tested versions..."
-            npx npm-check-updates@latest -u 2>&1 | tail -1 \
-              || echo "⚠ npm-check-updates failed (continuing with existing ranges)"
-            # Force core deps to known-good, published versions to avoid requesting non-existent releases
-            node <<'EOF' || echo "⚠ Failed to cap core deps; keep existing versions"
-const fs = require('fs');
-const path = require('path');
-const pkgPath = path.join(__dirname, 'package.json');
-const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-pkg.dependencies = pkg.dependencies || {};
-pkg.devDependencies = pkg.devDependencies || {};
-pkg.dependencies.react = "^18.3.1";
-pkg.dependencies["react-dom"] = "^18.3.1";
-pkg.dependencies.next = "16.0.7";
-if (pkg.devDependencies["eslint-config-next"] !== undefined) {
-  pkg.devDependencies["eslint-config-next"] = "16.0.7";
-}
-if (pkg.devDependencies["@types/react"] !== undefined) {
-  pkg.devDependencies["@types/react"] = "^18.2.0";
-}
-if (pkg.devDependencies["@types/react-dom"] !== undefined) {
-  pkg.devDependencies["@types/react-dom"] = "^18.2.0";
-}
-fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
-EOF
+    # Use npm ci if package-lock.json exists and is in sync, otherwise use npm install
+    if [ -f "package-lock.json" ]; then
+        if npm ci --prefer-offline --no-audit 2>&1 | tail -1; then
+            echo "✓ Dependencies installed with npm ci"
         else
-            echo "Updating package.json dependency ranges with npm-check-updates (best-effort, core deps pinned)..."
-            # Default: do not auto-bump core framework deps to avoid Next/React peer conflicts
-            npx npm-check-updates@latest -u --reject react,react-dom,next,eslint-config-next,@types/react,@types/react-dom 2>&1 | tail -1 \
-              || echo "⚠ npm-check-updates failed (continuing with existing ranges)"
+            echo "⚠ package-lock.json out of sync, updating..."
+            npm install --prefer-offline --no-audit 2>&1 | tail -1
         fi
-    fi
-
-    # Always install/update to latest compatible dependencies within current ranges
-    echo "Installing npm dependencies..."
-    if [ "${AUTO_UPDATE_CORE_DEPS:-0}" != "0" ]; then
-        # When core deps move, allow npm to relax peer resolution to avoid ERESOLVE loops
-        npm install --prefer-offline --no-audit --legacy-peer-deps 2>&1 | tail -1 || {
-            echo "ERROR: npm install failed (even with --legacy-peer-deps)"
-            exit 1
-        }
     else
-        npm install --prefer-offline --no-audit 2>&1 | tail -1 || {
-            echo "ERROR: npm install failed"
-            exit 1
-        }
+        npm install --prefer-offline --no-audit 2>&1 | tail -1
     fi
-
-    echo "Updating npm packages to latest compatible versions..."
-    npm update --no-audit 2>&1 | tail -1 || echo "⚠ npm update failed (continuing with installed versions)"
-
-    echo "Running npm audit fix (best effort)..."
-    npm audit fix --force --legacy-peer-deps 2>&1 | tail -1 || echo "⚠ npm audit fix failed (continuing)"
-
-    # Build with Turnstile site key if provided (support legacy VITE_ and new NEXT_PUBLIC_ names)
-    if [ -n "${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}" ]; then
-        NEXT_PUBLIC_TURNSTILE_SITE_KEY="$NEXT_PUBLIC_TURNSTILE_SITE_KEY" npm run build 2>&1 | tail -1
-    elif [ -n "${VITE_TURNSTILE_SITE_KEY:-}" ]; then
-        NEXT_PUBLIC_TURNSTILE_SITE_KEY="$VITE_TURNSTILE_SITE_KEY" npm run build 2>&1 | tail -1
+    # Build with Turnstile site key if provided
+    if [ -n "${VITE_TURNSTILE_SITE_KEY:-}" ]; then
+        VITE_TURNSTILE_SITE_KEY="$VITE_TURNSTILE_SITE_KEY" npm run build 2>&1 | tail -1
     else
         npm run build 2>&1 | tail -1
     fi
@@ -226,11 +154,7 @@ sudo chmod 644 $DATA_DIR/* 2>/dev/null || true
 echo "Installing frontend..."
 sudo mkdir -p $FRONTEND_PUBLIC
 sudo rm -rf $FRONTEND_PUBLIC/* 2>/dev/null || true
-if [ -d "$ROOT_DIR/frontend/out" ]; then
-    sudo cp -r "$ROOT_DIR/frontend/out"/* $FRONTEND_PUBLIC/
-else
-    echo "WARNING: frontend/out not found; did Next.js export succeed?"
-fi
+sudo cp -r "$ROOT_DIR/frontend/dist"/* $FRONTEND_PUBLIC/
 sudo chown -R root:root $FRONTEND_PUBLIC
 
 # Env file
