@@ -33,7 +33,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy binary from builder
-COPY --from=builder /build/server/target/release/w9 /app/w9
+COPY --from=builder /build/target/release/w9 /app/w9
 
 # Create data directory
 RUN mkdir -p /app/data /app/uploads && \
