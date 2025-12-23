@@ -6,6 +6,8 @@ services:
     image: ghcr.io/${GITHUB_USER:-your-username}/w9-tools-backend:latest
     container_name: w9-tools-backend
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     ports:
       - "${W9_TOOLS_PORT:-10105}:8080"
     environment:
@@ -41,6 +43,8 @@ services:
     image: ghcr.io/${GITHUB_USER:-your-username}/w9-tools-frontend:latest
     container_name: w9-tools-frontend
     restart: unless-stopped
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
     ports:
       - "${W9_TOOLS_FRONTEND_PORT:-8081}:80"
     networks:
